@@ -145,7 +145,7 @@ class DoctorTest(TempHome):
     def test_plugin_hooks(self):
         plugin = self.results()["Plugin"]
         self.assertEqual(plugin.status, "ok")
-        self.assertIn("4 hooks (Stop, PostToolUse, PreCompact, SessionStart)", plugin.detail)
+        self.assertIn("5 hooks (Stop, PostToolUse, PreCompact, SessionStart, SessionEnd)", plugin.detail)
         with mock.patch.object(handlers, "HOOKS", {**handlers.HOOKS, "notify": ("Notification", None)}):
             plugin = self.results()["Plugin"]
         self.assertEqual(plugin.status, "fail")

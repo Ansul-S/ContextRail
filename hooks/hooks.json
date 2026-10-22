@@ -44,6 +44,17 @@
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/contextrail/cr.py\" session-end",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }

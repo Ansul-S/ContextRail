@@ -26,6 +26,8 @@ DEFAULTS: Dict[str, Any] = {
     "max_chars": 12_000,
     # Also check the handoff against the session's facts (edited files, checks) before saving.
     "content_checks": True,
+    # A session that edited files and ends without a handoff past this many tokens gets a checkpoint.
+    "checkpoint_tokens": 30_000,
     # How many times one session is asked before ContextRail gives up.
     "max_attempts": 3,
     # SessionStart sources that load the handoff into the new session.

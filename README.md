@@ -45,6 +45,7 @@ Most of the time you do nothing:
 - **If you keep going instead**, ContextRail asks for a fresh handoff every 40k tokens.
 - **At 130k tokens in the middle of a long turn**, the agent is told to finish the current step and stop starting new work.
 - **Before compaction**, ContextRail saves the facts and carries over the last narrative, so a compacted session still gets a handoff.
+- **When a session ends without a handoff** (you `/clear` or exit before 100k), and it edited files and reached 30k tokens, ContextRail saves a checkpoint the same way, so the next session still knows where you left off. Claude Code gives this about 1.5 seconds and doesn't run it at all after a crash or a killed terminal, so it is a safety net, not a replacement for the handoff.
 
 Commands:
 
@@ -123,6 +124,7 @@ Settings are applied in this order, later ones winning:
   "refresh_tokens": 40000,
   "max_chars": 12000,
   "content_checks": true,
+  "checkpoint_tokens": 30000,
   "max_attempts": 3,
   "inject_on": ["startup", "clear", "compact"],
   "max_age_days": 30,
@@ -134,6 +136,7 @@ Settings are applied in this order, later ones winning:
 
 - `max_chars` caps the part the agent writes, which keeps the handoff to about 3k tokens when it is loaded.
 - `content_checks` holds the handoff against what ContextRail recorded before saving it: uncommitted files edited in the session that it never mentions, a Done section with no evidence, a first next step with nothing concrete in it, and a Done item that says a check passed when the facts show it failed. A gap gets the one fix request.
+- `checkpoint_tokens` is the context size a session must reach, having edited files, to get a checkpoint when it ends without a handoff.
 - `inject_on` sets which session starts load the handoff (`startup`, `clear`, `compact`, `resume`).
 - To turn ContextRail off everywhere, set `CONTEXTRAIL_DISABLE=1`. To turn it off for one project, put `{"enabled": false}` in that project's `config.json`.
 
@@ -197,7 +200,7 @@ Everything is standard-library Python 3.9+, with no dependencies. To try changes
 
 ```
 .claude-plugin/        plugin and marketplace manifests
-hooks/hooks.json       Stop, PostToolUse, PreCompact and SessionStart hooks
+hooks/hooks.json       Stop, PostToolUse, PreCompact, SessionStart and SessionEnd hooks
 commands/              /contextrail:handoff, :status, :doctor and :history
 contextrail/cr.py      entry point for hooks, the status line and the status, doctor and history commands
 contextrail/*.py       usage, facts, handoff, storage, config, prompts, status, doctor, history and statusline

@@ -2,7 +2,7 @@ import json
 import os
 from unittest import mock
 
-from contextrail import handlers, store
+from contextrail import handlers, handoff, store
 from tests.helpers import VALID_BODY, TempHome, assistant, git, tool_result, tool_use, user, write_transcript
 
 
@@ -256,6 +256,71 @@ class PreCompactTest(TempHome):
         document = store.Project(self.repo).handoff.read_text()
         self.assertIn("before manual compaction", document)
         self.assertIn("Not recorded", document)
+
+
+class SessionEndTest(TempHome):
+    def edit_session(self, tokens):
+        (self.repo / "app.py").write_text("print('edited')\n")
+        write_transcript(self.transcript, [
+            user(), tool_use("t1", "Edit", {"file_path": str(self.repo / "app.py")}, tokens=tokens), tool_result("t1"),
+        ])
+
+    def end(self, reason="clear"):
+        return handlers.on_session_end(self.payload("SessionEnd", reason=reason))
+
+    def project(self):
+        return store.Project(self.repo)
+
+    def test_checkpoint_when_a_session_with_edits_ends_without_a_handoff(self):
+        self.edit_session(45_000)
+        self.assertIsNone(self.end("prompt_input_exit"))
+        document = self.project().handoff.read_text()
+        self.assertIn("> Session ended (`prompt_input_exit`) without a handoff.", document)
+        self.assertIn("- Edited this session: `app.py`", document)
+        self.assertIn("Not recorded: this handoff was saved automatically when the session ended.", document)
+        # It loads into the next session, and a second end of the same session adds nothing.
+        context = handlers.on_session_start(self.payload("SessionStart", source="clear"))
+        self.assertIn("Session ended (`prompt_input_exit`)", context["hookSpecificOutput"]["additionalContext"])
+        self.end()
+        self.assertEqual(store.archived(self.project()), [])
+
+    def test_carries_the_last_narrative_over(self):
+        self.at_tokens(20_000)
+        handlers.on_stop(self.payload("Stop", session_id="earlier", last_assistant_message=block_message()))
+        self.edit_session(45_000)
+        self.end()
+        document = self.project().handoff.read_text()
+        self.assertIn(handoff.CARRIED_OVER, document)
+        self.assertTrue(handoff.narrative_of(document).endswith(VALID_BODY))
+        self.assertEqual(len(store.archived(self.project())), 1)
+
+    def test_no_checkpoint_after_a_recent_handoff_or_below_the_minimum(self):
+        self.edit_session(102_000)
+        handlers.on_stop(self.payload("Stop", last_assistant_message=block_message()))
+        saved = self.project().handoff.read_text()
+        self.edit_session(120_000)
+        self.end()
+        self.assertEqual(self.project().handoff.read_text(), saved)
+        self.edit_session(150_000)  # past refresh_tokens since that handoff
+        self.end()
+        self.assertIn("Session ended (`clear`)", self.project().handoff.read_text())
+        other = self.payload("SessionEnd", session_id="short", reason="clear")
+        self.edit_session(29_000)
+        project_before = self.project().handoff.read_text()
+        handlers.on_session_end(other)
+        self.assertEqual(self.project().handoff.read_text(), project_before)
+
+    def test_no_checkpoint_without_edits_or_out_of_time(self):
+        self.at_tokens(45_000)
+        self.end()
+        self.assertFalse(self.project().handoff.exists())
+        self.edit_session(45_000)
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS": "500"}):
+            self.end()
+        self.assertFalse(self.project().handoff.exists())
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS": "5000"}):
+            self.end()
+        self.assertTrue(self.project().handoff.exists())
 
 
 class SessionStartTest(TempHome):

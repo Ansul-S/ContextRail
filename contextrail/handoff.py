@@ -251,8 +251,8 @@ def render(
     return "\n".join(lines)
 
 
-def fallback_body(previous_narrative: str, previous_saved_at: Optional[str]) -> str:
-    """Body for a handoff saved without the agent (before compaction)."""
+def fallback_body(previous_narrative: str, previous_saved_at: Optional[str], when: str = "before compaction") -> str:
+    """Body for a handoff saved without the agent: before compaction, or when a session ends."""
     if previous_narrative.startswith(CARRIED_OVER):
         previous_narrative = previous_narrative.split("\n\n", 1)[-1]
     if previous_narrative:
@@ -262,8 +262,8 @@ def fallback_body(previous_narrative: str, previous_saved_at: Optional[str]) -> 
             "reflected in the facts above._\n\n" + previous_narrative
         )
     return (
-        "## Goal\nNot recorded: this handoff was saved automatically before compaction.\n\n"
-        "## Next steps\n1. Read the facts above and the conversation summary, then confirm "
+        f"## Goal\nNot recorded: this handoff was saved automatically {when}.\n\n"
+        "## Next steps\n1. Read the facts above, and the conversation summary if there is one, then confirm "
         "the goal and next step with the user.\n\n"
         "## Resume prompt\nContinue where the last session stopped. Check the handoff facts "
         "and tell me what you think the next step is before changing anything."

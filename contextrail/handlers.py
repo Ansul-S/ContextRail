@@ -21,6 +21,10 @@ Payload = Dict[str, Any]
 Output = Optional[Dict[str, Any]]
 
 WARN_EVERY_TOKENS = 30_000
+# Claude Code stops a SessionEnd hook after about 1.5 s (measured; the variable
+# below changes it). A checkpoint that can't be written well within that is skipped.
+SESSION_END_SECONDS = 1.5
+SESSION_END_MARGIN = 0.6
 # Stop payloads list in-flight background work; a task without a status counts too.
 IN_FLIGHT = ("running", "pending")
 MAX_TASK_CHARS = 60
@@ -291,14 +295,62 @@ def on_pre_compact(payload: Payload) -> Output:
         store.save_state(project, state)
         if fresh:
             return None
-        previous = project.handoff.read_text(encoding="utf-8") if project.handoff.exists() else ""
-        previous_meta = store.read_json(project.meta)
-        narrative_saved_at = previous_meta.get("narrative_saved_at") if previous else None
-        body = handoff.fallback_body(handoff.narrative_of(previous), narrative_saved_at)
         kind = "manual" if payload.get("trigger") == "manual" else "automatic"
-        notes = [f"Saved automatically before {kind} compaction, without a summary from the agent."]
-        _save(project, root, cfg, payload, usage, _record(payload, root), body, notes, narrative_saved_at)
+        note = f"Saved automatically before {kind} compaction, without a summary from the agent."
+        _checkpoint(project, root, cfg, payload, usage, _record(payload, root), note, "before compaction")
     return {"systemMessage": "ContextRail: saved the session facts before compaction; they load again afterwards."}
+
+
+def _checkpoint(
+    project: store.Project,
+    root: Path,
+    cfg: Dict[str, Any],
+    payload: Payload,
+    usage: Optional[Usage],
+    recorded: Tuple[Optional[facts.GitState], facts.Activity],
+    note: str,
+    when: str,
+) -> None:
+    """Save the recorded facts without the agent, carrying the last narrative over."""
+    previous = project.handoff.read_text(encoding="utf-8") if project.handoff.exists() else ""
+    previous_meta = store.read_json(project.meta)
+    narrative_saved_at = previous_meta.get("narrative_saved_at") if previous else None
+    body = handoff.fallback_body(handoff.narrative_of(previous), narrative_saved_at, when)
+    _save(project, root, cfg, payload, usage, recorded, body, [note], narrative_saved_at)
+
+
+def _session_end_deadline(start: float) -> float:
+    try:
+        seconds = int(os.environ["CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS"]) / 1000
+    except (KeyError, ValueError):
+        seconds = SESSION_END_SECONDS
+    return start + seconds - SESSION_END_MARGIN
+
+
+def on_session_end(payload: Payload) -> Output:
+    """A session that changed files ended without a recent handoff: save a
+    checkpoint of its facts. Crashes and killed terminals don't run this."""
+    start = time.monotonic()
+    root, project, cfg = _open(payload)
+    if not cfg["enabled"]:
+        return None
+    usage = last_usage(payload.get("transcript_path"), cfg["window_tokens"])
+    if usage is None or usage.tokens < cfg["checkpoint_tokens"]:
+        return None
+    with store.locked(project):
+        state = store.load_state(project)
+        entry = store.session(state, str(payload.get("session_id") or ""))
+        saved = entry["saved_tokens"]
+        if saved is not None and usage.tokens < saved + cfg["refresh_tokens"]:
+            return None
+        recorded = _record(payload, root)
+        if not recorded[1].edited or time.monotonic() > _session_end_deadline(start):
+            return None
+        note = f"Session ended (`{payload.get('reason') or 'other'}`) without a handoff."
+        _checkpoint(project, root, cfg, payload, usage, recorded, note, "when the session ended")
+        entry.update(saved_tokens=usage.tokens, updated=time.time())
+        store.save_state(project, state)
+    return None
 
 
 def on_session_start(payload: Payload) -> Output:
@@ -337,4 +389,5 @@ HOOKS = {
     "post-tool": ("PostToolUse", on_post_tool),
     "pre-compact": ("PreCompact", on_pre_compact),
     "session-start": ("SessionStart", on_session_start),
+    "session-end": ("SessionEnd", on_session_end),
 }
