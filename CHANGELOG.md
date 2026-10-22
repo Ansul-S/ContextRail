@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-10-23)
+
+A status line that shows how far the session is from its next handoff.
+
+### Upgrading
+
+- Update both plugins, then restart Claude Code.
+- The rail appears when ContextRail's launcher runs without a status line of its own. If you set it up in front of another status line, leave out the ` -- '…'` part of the `statusLine` command in `~/.claude/settings.json` to see the rail instead. If you have not set it up yet, run `/contextrail:doctor --setup-statusline`.
+
+### Status line
 
 - **Status line:** ContextRail's own status line is now a rail that shows how close the session is to its next handoff: `━━━━━━━━━●┄┄┄┄┄┄┄┄◆┄┄┄┄┄  52k · handoff at 100k · 48k to go · 5% of 1M window`, followed by the model and the project. The colour goes from green to amber near the handoff and to red past the wrap-up point. The text says what ContextRail does next: the handoff point, a request that is due or made, waiting for background tasks, a saved handoff and how long ago, or a handoff that was never written. On narrow terminals the least useful parts are left out, and `NO_COLOR` turns the colours off. It replaces `ctx 52% · 104k/200k · handoff at 100k`. A status line of your own that runs through the launcher still passes through unchanged.
 
