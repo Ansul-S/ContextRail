@@ -17,6 +17,10 @@ CR = ROOT / "contextrail" / "cr.py"
 
 GIT = ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false"]
 
+# Context at a test session's first reply, which the token limits count from. Small,
+# so limits in tests read as plain token counts.
+START = 2_000
+
 VALID_BODY = """## Goal
 Add rate limiting to the public API so one client cannot starve the rest.
 
@@ -159,5 +163,5 @@ class TempHome(unittest.TestCase):
         data.update(extra)
         return data
 
-    def at_tokens(self, tokens: int, model: str = "claude-sonnet-5-5") -> None:
-        write_transcript(self.transcript, [user("start"), assistant(tokens, model=model)])
+    def at_tokens(self, tokens: int, model: str = "claude-sonnet-5-5", start: int = START) -> None:
+        write_transcript(self.transcript, [user("start"), assistant(start, model=model), assistant(tokens, model=model)])

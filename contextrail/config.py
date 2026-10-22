@@ -12,10 +12,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 DEFAULTS: Dict[str, Any] = {
     "enabled": True,
-    # Ask for a handoff once context reaches the smaller of these two.
+    # Ask for a handoff once the session has grown by soft_tokens since its start
+    # (the context at its first reply), or context reaches soft_pct of the window.
     "soft_tokens": 100_000,
     "soft_pct": 50,
-    # Tell the agent to wrap up mid-turn once context reaches the smaller of these.
+    # The same pair for telling the agent mid-turn to wrap up.
     "hard_tokens": 130_000,
     "hard_pct": 65,
     # Context window in tokens. None means detect (see usage.resolve_window).
@@ -26,7 +27,7 @@ DEFAULTS: Dict[str, Any] = {
     "max_chars": 12_000,
     # Also check the handoff against the session's facts (edited files, checks) before saving.
     "content_checks": True,
-    # A session that edited files and ends without a handoff past this many tokens gets a checkpoint.
+    # A session that edited files and ends without a handoff, this many tokens past its start, gets a checkpoint.
     "checkpoint_tokens": 30_000,
     # How many times one session is asked before ContextRail gives up.
     "max_attempts": 3,
@@ -185,7 +186,10 @@ class Thresholds:
     hard: int
 
 
-def thresholds(cfg: Dict[str, Any], window: int) -> Thresholds:
-    soft = min(cfg["soft_tokens"], window * cfg["soft_pct"] // 100)
-    hard = min(cfg["hard_tokens"], window * cfg["hard_pct"] // 100)
+def thresholds(cfg: Dict[str, Any], window: int, start: int = 0) -> Thresholds:
+    """The context sizes for the handoff request and the wrap-up warning. The
+    token settings count from the session's start; the window shares cap them,
+    so a small window still hands off before auto-compaction."""
+    soft = min(start + cfg["soft_tokens"], window * cfg["soft_pct"] // 100)
+    hard = min(start + cfg["hard_tokens"], window * cfg["hard_pct"] // 100)
     return Thresholds(soft=soft, hard=max(hard, soft))

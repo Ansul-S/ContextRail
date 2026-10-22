@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import config, facts, store
 from .config import tilde
-from .usage import LARGE_WINDOW, session_report
+from .usage import LARGE_WINDOW, session_report, start_tokens
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 WRITE_EVERY = 5
@@ -156,9 +156,13 @@ def _view(payload: Dict[str, Any], window: int) -> View:
     cwd = payload.get("cwd") or workspace.get("current_dir")
     project = store.Project(facts.project_root(cwd)) if isinstance(cwd, str) and cwd else None
     cfg = config.load(project.dir if project else None)
-    limits = config.thresholds(cfg, cfg["window_tokens"] or window)
     entry = store.load_state(project)["sessions"].get(str(payload.get("session_id") or "")) if project else None
     entry = entry if isinstance(entry, dict) else {}
+    start = entry.get("start_tokens")
+    if not isinstance(start, int):  # the Stop hook keeps it once the first turn ends
+        transcript = payload.get("transcript_path")
+        start = start_tokens(transcript if isinstance(transcript, str) else None) or 0
+    limits = config.thresholds(cfg, cfg["window_tokens"] or window, start)
     saved = entry.get("saved_tokens") if isinstance(entry.get("saved_tokens"), int) else None
     ago = None
     if saved is not None and project:

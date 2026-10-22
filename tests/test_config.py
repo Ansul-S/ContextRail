@@ -89,3 +89,12 @@ class ConfigTest(TempHome):
         self.assertEqual(config.thresholds(cfg, 128_000), config.Thresholds(soft=64_000, hard=83_200))
         cfg.update(soft_tokens=300_000, hard_tokens=100_000)
         self.assertEqual(config.thresholds(cfg, 1_000_000), config.Thresholds(soft=300_000, hard=300_000))
+
+    def test_thresholds_count_from_the_session_start(self):
+        cfg = config.load()
+        self.assertEqual(config.thresholds(cfg, 1_000_000, 50_522), config.Thresholds(soft=150_522, hard=180_522))
+        # A small window keeps its share caps, so it still hands off well before auto-compaction.
+        self.assertEqual(config.thresholds(cfg, 200_000, 50_522), config.Thresholds(soft=100_000, hard=130_000))
+        self.assertEqual(config.thresholds(cfg, 200_000, 20_000), config.Thresholds(soft=100_000, hard=130_000))
+        self.assertEqual(config.thresholds(cfg, 400_000, 50_000), config.Thresholds(soft=150_000, hard=180_000))
+        self.assertEqual(config.thresholds(cfg, 250_000, 50_000), config.Thresholds(soft=125_000, hard=162_500))

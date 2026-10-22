@@ -6,7 +6,7 @@ Long coding sessions get worse well before the context window is full. The agent
 
 ContextRail is a Claude Code plugin that does it for you:
 
-1. **It notices** when the session reaches the point where quality starts to drop (100k tokens by default).
+1. **It notices** when the session reaches the point where quality starts to drop (by default, once it has grown 100k tokens past where it started).
 2. **It asks the agent for a handoff** while the agent still has the full picture: the goal, your rules in your own words, what is done and in progress, next steps, decisions, dead ends, facts already found, how to run things, open questions with options, and a short resume prompt.
 3. **It saves the handoff** outside your repository, with facts it records itself: branch, commit, uncommitted files, files edited, and test runs.
 4. **It loads the handoff** into the next session. That happens on `/clear`, on a new session, or after compaction, together with what changed in the repository since and which of the handoff's claims to re-check.
@@ -39,13 +39,13 @@ To try it without installing, clone the repository and start Claude Code with `c
 
 Most of the time you do nothing:
 
-- **At 100k tokens**, when the agent finishes a turn, ContextRail asks it for a handoff. The agent replies with it, and ContextRail saves it and tells you.
-- **If background tasks are still running** (a test run in the background, a subagent), ContextRail waits until they finish, because their results belong in the handoff. It says so once, and stops waiting at 130k.
+- **100k tokens into the session**, counted from its first reply, when the agent finishes a turn, ContextRail asks it for a handoff. The agent replies with it, and ContextRail saves it and tells you.
+- **If background tasks are still running** (a test run in the background, a subagent), ContextRail waits until they finish, because their results belong in the handoff. It says so once, and stops waiting 130k tokens into the session.
 - **Type `/clear`.** The new session starts with the handoff loaded. Paste the resume prompt from your clipboard, or just say "continue".
 - **If you keep going instead**, ContextRail asks for a fresh handoff every 40k tokens.
-- **At 130k tokens in the middle of a long turn**, the agent is told to finish the current step and stop starting new work.
+- **130k tokens into the session, in the middle of a long turn**, the agent is told to finish the current step and stop starting new work.
 - **Before compaction**, ContextRail saves the facts and carries over the last narrative, so a compacted session still gets a handoff.
-- **When a session ends without a handoff** (you `/clear` or exit before 100k), and it edited files and reached 30k tokens, ContextRail saves a checkpoint the same way, so the next session still knows where you left off. Claude Code gives this about 1.5 seconds and doesn't run it at all after a crash or a killed terminal, so it is a safety net, not a replacement for the handoff.
+- **When a session ends without a handoff** (you `/clear` or exit before the request), and it edited files and grew by 30k tokens, ContextRail saves a checkpoint the same way, so the next session still knows where you left off. Claude Code gives this about 1.5 seconds and doesn't run it at all after a crash or a killed terminal, so it is a safety net, not a replacement for the handoff.
 
 Commands:
 
@@ -84,18 +84,19 @@ The settings are offered when you install it, and are in `/config` afterwards.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `soft_tokens` / `soft_pct` | 100,000 / 50% | Ask for a handoff at whichever comes first. |
+| `soft_tokens` / `soft_pct` | 100,000 / 50% | Ask for a handoff at whichever comes first: this many tokens past the session's start, or this share of the window. |
 | `hard_tokens` / `hard_pct` | 130,000 / 65% | Tell the agent mid-turn to wrap up. Also the longest ContextRail waits for background tasks. |
 | `refresh_tokens` | 40,000 | If you keep working after a handoff, ask again after this much growth. |
 
 Why these numbers:
 
+- **Sessions don't start empty.** Claude Code's system prompt and tools, skills, MCP instructions, `CLAUDE.md` files and the loaded handoff often add up to 30-50k tokens before any work. So the token settings count from the context at the session's first reply, or the first one after compaction. With a 50k start, the handoff comes at about 150k and the wrap-up at 180k. `/contextrail:status` shows the start.
 - **Usable space is smaller than the window.** Claude Code reserves roughly 16% of the window for auto-compaction. 50% of the raw window is about 60% of the space you can actually use.
 - **The agent needs to still be sharp.** Asking at 50% leaves headroom for writing the handoff (3-5k tokens) while the agent is still at its best. Auto-compaction fires around 83%, which is too late for a good summary.
-- **Absolute tokens matter more than percentages.** Quality declines gradually with length, whatever the window size. On a 1M-token window, 50% would mean 500k tokens, far past the point where long sessions get unreliable. That is why the token cap usually decides.
+- **Absolute tokens matter more than percentages.** Quality declines gradually with length, whatever the window size. On a 1M-token window, 50% would mean 500k tokens, far past the point where long sessions get unreliable. That is why the token setting usually decides. On a 200k window the shares decide instead (100k and 130k), so a session still hands off before auto-compaction, wherever it started.
 - **These are starting points, not laws.** Raise them if your sessions hold up longer.
 
-Context usage is read from the session transcript, the same way Claude Code computes it. Hook payloads do not include the window size. Without the status-line wrapper below, ContextRail assumes 200k unless the model name says `[1m]` or usage has already passed 200k. Several current models have a 1M window without saying so in their name, and then the percentages ContextRail shows are too high. The token caps still apply, so the default triggers are unchanged. But if you raise the caps on such a model, set up the wrapper or set `window_tokens`.
+Context usage is read from the session transcript, the same way Claude Code computes it. Hook payloads do not include the window size. Without the status-line wrapper below, ContextRail assumes 200k unless the model name says `[1m]` or usage has already passed 200k. Several current models have a 1M window without saying so in their name, and then the percentages ContextRail shows are too high. The shares of the assumed 200k then decide, so the handoff comes at 100k whatever the session's start. Set up the wrapper or set `window_tokens` to count from the start on such a model, or if you raise the token settings.
 
 ### Exact window size (optional)
 
@@ -110,12 +111,12 @@ This writes a small launcher to `~/.contextrail/bin/statusline` and prints the `
 If you have no status line, ContextRail shows its own: a rail that fills up as the session's context grows.
 
 ```
-━━━━━━━━━●┄┄┄┄┄┄┄┄◆┄┄┄┄┄  52k · handoff at 100k · 48k to go · 5% of 1M window · Opus 5.5 · my-project
+━━━━━━●┄┄┄┄┄┄┄┄┄┄┄┄┄◆┄┄┄  52k · handoff at 150k · 98k to go · 5% of 1M window · Opus 5.5 · my-project
 ```
 
-- `●` is where the session is now and `◆` is the next handoff request. The rail ends at the wrap-up point, 130k by default. After a handoff is saved, `◇` marks it and the rail reaches past the next request.
+- `●` is where the session is now and `◆` is the next handoff request. The rail ends at the wrap-up point, 130k past the session's start by default. After a handoff is saved, `◇` marks it and the rail reaches past the next request.
 - The colour goes from green to amber as the handoff gets close, and to red past the wrap-up point.
-- The text after the rail says what ContextRail does next: `handoff at 100k`, `◆ handoff due`, `◆ handoff requested`, `◷ waiting for background tasks`, `✓ saved 3m ago · next at 142k`, or `✗ no handoff written`.
+- The text after the rail says what ContextRail does next: `handoff at 150k`, `◆ handoff due`, `◆ handoff requested`, `◷ waiting for background tasks`, `✓ saved 3m ago · next at 192k`, or `✗ no handoff written`.
 - On a narrow terminal the project, the model and the window share are left out first. `NO_COLOR` turns the colours off.
 
 To use ContextRail's line in place of your own, leave out the ` -- '…'` part of the launcher command.
@@ -149,7 +150,7 @@ Settings are applied in this order, later ones winning:
 
 - `max_chars` caps the part the agent writes, which keeps the handoff to about 3k tokens when it is loaded.
 - `content_checks` holds the handoff against what ContextRail recorded before saving it: uncommitted files edited in the session that it never mentions, a Done section with no evidence, a first next step with nothing concrete in it, and a Done item that says a check passed when the facts show it failed. A gap gets the one fix request.
-- `checkpoint_tokens` is the context size a session must reach, having edited files, to get a checkpoint when it ends without a handoff.
+- `checkpoint_tokens` is how far a session must grow past its start, having edited files, to get a checkpoint when it ends without a handoff.
 - `inject_on` sets which session starts load the handoff (`startup`, `clear`, `compact`, `resume`).
 - To turn ContextRail off everywhere, set `CONTEXTRAIL_DISABLE=1`. To turn it off for one project, put `{"enabled": false}` in that project's `config.json`.
 

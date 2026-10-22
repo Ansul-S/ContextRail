@@ -80,6 +80,7 @@ def session(state: Dict[str, Any], session_id: str) -> Dict[str, Any]:
     entry.setdefault("warned_tokens", None)
     entry.setdefault("gave_up", False)
     entry.setdefault("deferred_notice", False)
+    entry.setdefault("start_tokens", None)
     return entry
 
 

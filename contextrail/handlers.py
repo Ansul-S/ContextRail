@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import __version__, config, facts, handoff, prompts, store
 from .config import tilde
-from .usage import Usage, last_assistant_text, last_usage
+from .usage import Usage, last_assistant_text, last_usage, start_tokens
 
 Payload = Dict[str, Any]
 Output = Optional[Dict[str, Any]]
@@ -99,6 +99,13 @@ def _open(payload: Payload) -> Tuple[Path, store.Project, Dict[str, Any]]:
     root = facts.project_root(str(payload.get("cwd") or os.getcwd()))
     project = store.Project(root)
     return root, project, config.load(project.dir)
+
+
+def _start(entry: Dict[str, Any], payload: Payload) -> int:
+    """The session's context at its start, kept in its state entry once known; 0 until then."""
+    if not isinstance(entry["start_tokens"], int):
+        entry["start_tokens"] = start_tokens(payload.get("transcript_path"))
+    return entry["start_tokens"] or 0
 
 
 def _record(payload: Payload, root: Path) -> Tuple[Optional[facts.GitState], facts.Activity]:
@@ -198,7 +205,7 @@ def _maybe_request(payload: Payload, cfg: Dict[str, Any], entry: Dict[str, Any])
     usage = last_usage(payload.get("transcript_path"), cfg["window_tokens"])
     if usage is None:
         return None
-    limits = config.thresholds(cfg, usage.window)
+    limits = config.thresholds(cfg, usage.window, _start(entry, payload))
     saved = entry["saved_tokens"]
     if usage.tokens < limits.soft or (saved is not None and usage.tokens < saved + cfg["refresh_tokens"]):
         return None
@@ -258,11 +265,14 @@ def on_post_tool(payload: Payload) -> Output:
     if not cfg["enabled"]:
         return None
     usage = last_usage(payload.get("transcript_path"), cfg["window_tokens"])
+    # Below the limit counted from zero, it is below it from any start; this runs on every tool call.
     if usage is None or usage.tokens < config.thresholds(cfg, usage.window).hard:
         return None
     with store.locked(project):
         state = store.load_state(project)
         entry = store.session(state, str(payload.get("session_id") or ""))
+        if usage.tokens < config.thresholds(cfg, usage.window, _start(entry, payload)).hard:
+            return None
         saved, warned = entry["saved_tokens"], entry["warned_tokens"]
         if saved is not None and usage.tokens < saved + cfg["refresh_tokens"]:
             return None
@@ -289,8 +299,9 @@ def on_pre_compact(payload: Payload) -> Output:
         entry = store.session(state, str(payload.get("session_id") or ""))
         saved = entry["saved_tokens"]
         fresh = saved is not None and usage is not None and usage.tokens < saved + cfg["refresh_tokens"]
-        # Context starts small again after compaction, so the next request is due at the soft limit.
-        entry.update(attempts=0, retries=0, saved_tokens=None, warned_tokens=None, gave_up=False)
+        # Context starts small again after compaction, so the next request is due at the soft limit,
+        # counted from the first reply after it.
+        entry.update(attempts=0, retries=0, saved_tokens=None, warned_tokens=None, gave_up=False, start_tokens=None)
         entry["updated"] = time.time()
         store.save_state(project, state)
         if fresh:
@@ -341,6 +352,8 @@ def on_session_end(payload: Payload) -> Output:
         state = store.load_state(project)
         entry = store.session(state, str(payload.get("session_id") or ""))
         saved = entry["saved_tokens"]
+        if usage.tokens < _start(entry, payload) + cfg["checkpoint_tokens"]:
+            return None
         if saved is not None and usage.tokens < saved + cfg["refresh_tokens"]:
             return None
         recorded = _record(payload, root)

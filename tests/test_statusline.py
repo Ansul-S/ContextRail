@@ -156,6 +156,15 @@ class StatusLineTest(TempHome):
         del homeless["workspace"]
         self.assertIn("  51k · handoff at 100k ·", statusline.line(homeless))
 
+    def test_counts_from_the_session_start(self):
+        payload = sample(str(self.repo))
+        payload["transcript_path"] = str(self.transcript)
+        write_transcript(self.transcript, [user(), assistant(50_591)])
+        self.assertIn("  51k · handoff at 151k · 100k to go · 5% of 1M window", statusline.line(payload))
+        # The start the Stop hook kept wins over the transcript.
+        self.set_session(start_tokens=40_000)
+        self.assertIn("  51k · handoff at 140k · 89k to go ·", statusline.line(payload))
+
     def test_rail_ends_at_the_wrap_up_point_or_past_the_next_request(self):
         self.assertTrue(self.line_at(130_000).startswith("━━━━━━━━━━━━━━━━━━◆━━━━●  130k"))
         self.assertTrue(self.line_at(400_000).startswith("━━━━━━━━━━━━━━━━━━◆━━━━●  400k"))

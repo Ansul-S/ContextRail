@@ -14,7 +14,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, List, Optional, Tuple
+from typing import Any, Iterator, List, Optional, Tuple
 
 from . import config
 from .store import read_json, slug
@@ -114,6 +114,16 @@ def resolve_window(model: str, tokens: int, configured: Optional[int], reported:
     return DEFAULT_WINDOW, "assumed"
 
 
+def _context_tokens(entry: Any) -> int:
+    """The context of a main-thread assistant message in a transcript, or 0 for any other entry."""
+    if not isinstance(entry, dict) or entry.get("type") != "assistant" or entry.get("isSidechain"):
+        return 0
+    usage = (entry.get("message") or {}).get("usage") or {}
+    return sum(
+        int(usage.get(key) or 0) for key in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+    )
+
+
 def last_usage(transcript_path: Optional[str], configured_window: Optional[int] = None) -> Optional[Usage]:
     if not transcript_path:
         return None
@@ -125,17 +135,10 @@ def last_usage(transcript_path: Optional[str], configured_window: Optional[int] 
                 entry = json.loads(raw)
             except ValueError:
                 continue
-            if not isinstance(entry, dict) or entry.get("type") != "assistant" or entry.get("isSidechain"):
-                continue
-            message = entry.get("message") or {}
-            usage = message.get("usage") or {}
-            tokens = sum(
-                int(usage.get(key) or 0)
-                for key in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
-            )
+            tokens = _context_tokens(entry)
             if tokens <= 0:
                 continue  # synthetic or error messages carry no usage
-            model = str(message.get("model") or "")
+            model = str((entry.get("message") or {}).get("model") or "")
             # Transcripts are named <session id>.jsonl, the id the status line reports under.
             reported = None if configured_window else reported_window(Path(transcript_path).stem)
             window, source = resolve_window(model, tokens, configured_window, reported)
@@ -143,6 +146,32 @@ def last_usage(transcript_path: Optional[str], configured_window: Optional[int] 
     except OSError:
         return None
     return None
+
+
+def start_tokens(transcript_path: Optional[str]) -> Optional[int]:
+    """Context at the session's first main-thread reply, or at the first one after
+    the latest compaction: what the session holds before any work, mostly Claude
+    Code's own system prompt and tools. None until there is such a reply."""
+    if not transcript_path:
+        return None
+    start = None
+    try:
+        with open(transcript_path, "rb") as f:
+            for raw in f:
+                if b'"compact_boundary"' not in raw and (start is not None or b'"usage"' not in raw):
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except ValueError:
+                    continue
+                system = isinstance(entry, dict) and entry.get("type") == "system"
+                if system and entry.get("subtype") == "compact_boundary":
+                    start = None
+                elif start is None:
+                    start = _context_tokens(entry) or None
+    except OSError:
+        return None
+    return start
 
 
 def last_assistant_text(transcript_path: Optional[str]) -> str:

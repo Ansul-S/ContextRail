@@ -8,7 +8,7 @@ from typing import List
 from . import __version__, config, doctor, facts, store
 from .config import tilde
 from .handlers import age_seconds, describe_age
-from .usage import DEFAULT_WINDOW, last_usage, transcripts
+from .usage import DEFAULT_WINDOW, last_usage, start_tokens, transcripts
 
 
 def main(args: List[str]) -> int:
@@ -22,9 +22,11 @@ def main(args: List[str]) -> int:
 
     found = transcripts(cwd)
     usage = last_usage(str(found[0]), cfg["window_tokens"]) if found else None
-    limits = config.thresholds(cfg, usage.window if usage else cfg["window_tokens"] or DEFAULT_WINDOW)
+    start = (start_tokens(str(found[0])) or 0) if usage else 0
+    limits = config.thresholds(cfg, usage.window if usage else cfg["window_tokens"] or DEFAULT_WINDOW, start)
     if usage:
         print(f"Context:   {usage.describe()}, latest session")
+        print(f"Start:     {start:,} tokens at its first reply; the token triggers count from there")
         print(f"Window:    {usage.window:,} tokens, from {doctor.WINDOW_SOURCES[usage.window_source]}")
     else:
         print("Context:   no session transcript found for this folder")

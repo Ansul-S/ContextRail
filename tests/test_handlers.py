@@ -3,7 +3,7 @@ import os
 from unittest import mock
 
 from contextrail import handlers, handoff, store
-from tests.helpers import VALID_BODY, TempHome, assistant, git, tool_result, tool_use, user, write_transcript
+from tests.helpers import START, VALID_BODY, TempHome, assistant, git, tool_result, tool_use, user, write_transcript
 
 
 def block_message(body=VALID_BODY):
@@ -46,6 +46,21 @@ class StopTest(TempHome):
             self.assertIsNone(self.stop(last_assistant_message="ok"))
             self.at_tokens(310_000)
             self.assertEqual(self.stop(last_assistant_message="ok")["decision"], "block")
+
+    def test_counts_from_the_session_start(self):
+        large = "claude-opus-5-5[1m]"
+        self.at_tokens(140_000, model=large, start=50_522)
+        self.assertIsNone(self.stop(last_assistant_message="ok"))
+        self.assertEqual(store.load_state(self.project())["sessions"]["session-1"]["start_tokens"], 50_522)
+        # The start is kept for the session, whatever the transcript's end looks like later.
+        self.at_tokens(150_000, model=large, start=START)
+        self.assertIsNone(self.stop(last_assistant_message="ok"))
+        self.at_tokens(151_000, model=large, start=START)
+        self.assertEqual(self.stop(last_assistant_message="ok")["decision"], "block")
+
+    def test_small_windows_keep_the_share_cap(self):
+        self.at_tokens(101_000, start=50_522)
+        self.assertEqual(self.stop(last_assistant_message="ok")["decision"], "block")
 
     def test_no_chained_request_when_stop_hook_active(self):
         self.at_tokens(102_000)
@@ -213,6 +228,12 @@ class PostToolTest(TempHome):
         self.at_tokens(162_000)
         self.assertIsNotNone(self.post())
 
+    def test_counts_from_the_session_start(self):
+        self.at_tokens(180_000, model="claude-opus-5-5[1m]", start=50_522)
+        self.assertIsNone(self.post())
+        self.at_tokens(181_000, model="claude-opus-5-5[1m]", start=50_522)
+        self.assertIn("past the wrap-up point", self.post()["hookSpecificOutput"]["additionalContext"])
+
     def test_quiet_after_a_fresh_handoff(self):
         self.at_tokens(131_000)
         handlers.on_stop(self.payload("Stop", last_assistant_message=block_message()))
@@ -250,6 +271,19 @@ class PreCompactTest(TempHome):
         self.at_tokens(101_000)
         self.assertEqual(handlers.on_stop(self.payload("Stop", last_assistant_message="ok"))["decision"], "block")
 
+    def test_counts_from_the_first_reply_after_compaction(self):
+        large = "claude-opus-5-5[1m]"
+        self.at_tokens(140_000, model=large, start=50_000)
+        self.assertIsNone(handlers.on_stop(self.payload("Stop", last_assistant_message="ok")))
+        self.at_tokens(149_000, model=large, start=50_000)
+        handlers.on_pre_compact(self.payload("PreCompact", trigger="auto"))
+        boundary = {"type": "system", "subtype": "compact_boundary", "isSidechain": False}
+        compacted = [user("start"), assistant(50_000, model=large), boundary, user("summary"), assistant(66_000, model=large)]
+        write_transcript(self.transcript, compacted + [assistant(160_000, model=large)])
+        self.assertIsNone(handlers.on_stop(self.payload("Stop", last_assistant_message="ok")))
+        write_transcript(self.transcript, compacted + [assistant(167_000, model=large)])
+        self.assertEqual(handlers.on_stop(self.payload("Stop", last_assistant_message="ok"))["decision"], "block")
+
     def test_stub_when_no_previous_handoff(self):
         self.at_tokens(160_000)
         handlers.on_pre_compact(self.payload("PreCompact", trigger="manual"))
@@ -259,10 +293,11 @@ class PreCompactTest(TempHome):
 
 
 class SessionEndTest(TempHome):
-    def edit_session(self, tokens):
+    def edit_session(self, tokens, start=START):
         (self.repo / "app.py").write_text("print('edited')\n")
         write_transcript(self.transcript, [
-            user(), tool_use("t1", "Edit", {"file_path": str(self.repo / "app.py")}, tokens=tokens), tool_result("t1"),
+            user(), assistant(start),
+            tool_use("t1", "Edit", {"file_path": str(self.repo / "app.py")}, tokens=tokens), tool_result("t1"),
         ])
 
     def end(self, reason="clear"):
@@ -309,6 +344,14 @@ class SessionEndTest(TempHome):
         project_before = self.project().handoff.read_text()
         handlers.on_session_end(other)
         self.assertEqual(self.project().handoff.read_text(), project_before)
+
+    def test_minimum_counts_from_the_session_start(self):
+        self.edit_session(79_000, start=50_000)
+        self.end()
+        self.assertFalse(self.project().handoff.exists())
+        self.edit_session(81_000, start=50_000)
+        self.end()
+        self.assertTrue(self.project().handoff.exists())
 
     def test_no_checkpoint_without_edits_or_out_of_time(self):
         self.at_tokens(45_000)

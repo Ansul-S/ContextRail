@@ -4,7 +4,7 @@ import subprocess
 import sys
 import time
 
-from contextrail import config, handlers, handoff, prompts
+from contextrail import config, handlers, handoff, prompts, store
 from tests.helpers import CR, ROOT, VALID_BODY, TempHome
 
 
@@ -37,13 +37,19 @@ class CliTest(TempHome):
         self.assertTrue((self.home / "error.log").exists())
 
     def test_status(self):
+        self.transcript = self.claude / "projects" / store.slug(self.repo) / "session-1.jsonl"
+        self.transcript.parent.mkdir(parents=True)
         self.at_tokens(10_000)
         self.run_cr("stop", stdin=json.dumps(self.payload(
             "Stop", last_assistant_message=f"<contextrail-handoff>\n{VALID_BODY}\n</contextrail-handoff>")))
         result = self.run_cr("status", str(self.repo))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"Project:   {self.repo}", result.stdout)
+        self.assertIn("Start:     2,000 tokens at its first reply; the token triggers count from there", result.stdout)
         self.assertIn("Triggers:  handoff at 100,000 tokens, wrap-up at 130,000", result.stdout)
+        self.at_tokens(60_000, model="claude-opus-5-5[1m]", start=50_522)
+        result = self.run_cr("status", str(self.repo))
+        self.assertIn("Triggers:  handoff at 150,522 tokens, wrap-up at 180,522", result.stdout)
         self.assertIn("Handoff:   saved just now", result.stdout)
 
     def test_status_points_at_doctor_after_errors(self):

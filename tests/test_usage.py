@@ -86,6 +86,39 @@ class LastUsageTest(unittest.TestCase):
         self.assertEqual(line, "100,000 tokens of context (≈10% of a 1M window)")
 
 
+# The line Claude Code 2.1.308 writes where it compacts a transcript, trimmed.
+COMPACT_BOUNDARY = {
+    "type": "system", "subtype": "compact_boundary", "isSidechain": False,
+    "compactMetadata": {"trigger": "auto", "preTokens": 490_032, "postTokens": 21_306},
+}
+
+
+class StartTokensTest(LastUsageTest):
+    def test_first_main_thread_reply(self):
+        synthetic = assistant(0)
+        synthetic["message"]["usage"] = {"input_tokens": 0, "output_tokens": 0}
+        write_transcript(self.path, [
+            user(), tool_result("t0", text="what compact_boundary means"), assistant(30_000, sidechain=True),
+            synthetic, assistant(50_522), user(), assistant(90_000),
+        ])
+        self.assertEqual(usage.start_tokens(str(self.path)), 50_522)
+
+    def test_first_reply_after_the_latest_compaction(self):
+        write_transcript(self.path, [
+            user(), assistant(50_000), assistant(400_000), COMPACT_BOUNDARY, user(), assistant(70_000),
+            assistant(300_000), COMPACT_BOUNDARY, user(), assistant(66_212), assistant(80_000),
+        ])
+        self.assertEqual(usage.start_tokens(str(self.path)), 66_212)
+        write_transcript(self.path, [user(), assistant(50_000), COMPACT_BOUNDARY, user()])
+        self.assertIsNone(usage.start_tokens(str(self.path)))
+
+    def test_missing_or_empty_transcript(self):
+        self.assertIsNone(usage.start_tokens(str(self.path)))
+        self.assertIsNone(usage.start_tokens(None))
+        write_transcript(self.path, [user()])
+        self.assertIsNone(usage.start_tokens(str(self.path)))
+
+
 class LastAssistantTextTest(unittest.TestCase):
     def test_joins_text_blocks_of_the_latest_message(self):
         with tempfile.TemporaryDirectory() as tmp:
