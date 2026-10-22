@@ -7,6 +7,9 @@
 - **`/contextrail:doctor`:** checks Python and how long a hook takes to start, the plugin's hooks, storage, settings (including keys and values that are ignored), when each hook last ran, whether usage can be read from the transcripts, whether the saved handoff would load, and recent errors. `cr.py doctor` exits 1 if a check fails.
 - **Heartbeat:** each hook notes when it last ran in `~/.contextrail/heartbeat.json`, at most once a minute.
 - **Status:** `/contextrail:status` mentions errors from the last 24 hours.
+- **`/contextrail:history`:** lists a project's saved handoffs, newest first, with each one's date, size and first next step. `--restore N` makes an archived handoff current again. Archived handoffs now keep their `meta.json` beside them, so a restored one gets the drift check.
+- **`contextrail-continue` (optional):** a second plugin in the marketplace, built as a mod, that clears the session and sends the resume prompt once ContextRail has asked for a handoff and saved it. It waits 10 seconds first and stays in the session when you start typing, when background or scheduled tasks are pending, or after 3 continues in a row without you. Needs a Claude Code version with mods (early access).
+- **Fix:** when two handoffs were archived in the same second, the newer one could sort as older and be pruned first.
 - **Fix:** `inject_on: ["resume"]` had no effect, because the SessionStart hook only ran on startup, `/clear` and compaction. The hook now runs on every session start, and `inject_on` decides.
 
 ## 0.1.0 (2026-10-22)

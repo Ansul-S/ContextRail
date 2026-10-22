@@ -429,7 +429,9 @@ def drift(meta: Dict, root: Path) -> List[str]:
                 notes.append(f"{len(commits)} new commit(s) since the handoff: {listed}")
             else:
                 notes.append(f"HEAD moved back to {now.head[:9]} (reset or checkout?).")
-    before = set(meta.get("dirty") or [])
+    if meta.get("dirty") is None:  # not recorded: a handoff restored from an old archive
+        return notes
+    before = set(meta["dirty"])
     after = set(now.dirty)
     if before - after:
         notes.append(f"No longer uncommitted (committed or reverted): {_short_list(sorted(before - after))}.")

@@ -9,7 +9,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from . import config
 
@@ -93,21 +93,35 @@ def save_state(project: Project, state: Dict[str, Any]) -> None:
     write_atomic(project.state, json.dumps(state, indent=2))
 
 
+def archive_order(path: Path) -> Tuple[str, int]:
+    """Oldest first: archives are named <stamp>.md, or <stamp>-<n>.md for later
+    ones saved in the same second (the stamp is 19 characters)."""
+    stem = path.stem
+    counter = stem[20:] if stem[19:20] == "-" else ""
+    return stem[:19], int(counter) if counter.isdigit() else 0
+
+
+def archived(project: Project) -> List[Path]:
+    """The archived handoffs, oldest first."""
+    return sorted(project.history.glob("*.md"), key=archive_order) if project.history.exists() else []
+
+
 def save_handoff(project: Project, document: str, meta: Dict[str, Any], resume: str, keep: int) -> None:
     if project.handoff.exists():
         project.history.mkdir(parents=True, exist_ok=True)
         stamp = re.sub(r"[^0-9T]", "-", str(read_json(project.meta).get("saved_at", "")))[:19]
         if not stamp:
             stamp = time.strftime("%Y-%m-%dT%H-%M-%S", time.localtime(project.handoff.stat().st_mtime))
-        target = project.history / f"{stamp}.md"
-        counter = 1
-        while target.exists():
-            target = project.history / f"{stamp}-{counter}.md"
-            counter += 1
+        # Past every archive of the same second, even one pruned below it, so names keep their order.
+        same = [archive_order(path)[1] for path in project.history.glob(f"{stamp}*.md") if path.stem[:19] == stamp]
+        target = project.history / (f"{stamp}-{max(same) + 1}.md" if same else f"{stamp}.md")
         os.replace(project.handoff, target)
-        archived = sorted(project.history.glob("*.md"))
-        for old in archived[: max(0, len(archived) - keep)]:
+        if project.meta.exists():  # kept beside it, so a restored handoff gets its drift check
+            os.replace(project.meta, target.with_suffix(".json"))
+        older = archived(project)
+        for old in older[: max(0, len(older) - keep)]:
             old.unlink()
+            old.with_suffix(".json").unlink(missing_ok=True)
     write_atomic(project.handoff, document)
     write_atomic(project.meta, json.dumps(meta, indent=2))
     if resume:

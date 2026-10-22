@@ -52,6 +52,31 @@ Commands:
 | `/contextrail:handoff` | Write a handoff now, at any context size. Useful before a break. |
 | `/contextrail:status` | Show context usage, trigger points, the saved handoff, and what changed since it was saved. |
 | `/contextrail:doctor` | Check the setup: Python, the hooks, storage and settings, when each hook last ran, whether usage can be read, and whether the saved handoff would load. |
+| `/contextrail:history` | List the saved handoffs, newest first, with each one's first next step. `/contextrail:history --restore N` makes an archived one current again. |
+
+## Hands-free continue (optional)
+
+ContextRail leaves `/clear` to you, because hooks can't run slash commands. The optional `contextrail-continue` plugin does it for you: once ContextRail has asked for a handoff and saved it, the plugin waits 10 seconds, runs `/clear`, and sends the handoff's resume prompt, so the work carries on in a fresh session with the handoff loaded.
+
+```
+/plugin install contextrail-continue@contextrail
+```
+
+It is a mod, a newer kind of Claude Code plugin written in TypeScript. Mods are in early access, so this needs a recent Claude Code; it was tested with 2.1.308. ContextRail itself works without it.
+
+It stays in the current session instead when:
+
+- you start typing during the 10 seconds, or send a prompt;
+- background tasks or scheduled tasks (such as `/loop`) are still pending;
+- it has already continued 3 times in a row without a prompt from you.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `delay_seconds` | 10 | How long to wait after the handoff is saved. |
+| `max_in_a_row` | 3 | How many times to continue without a prompt from you in between. |
+| `after_manual` | off | Also continue after a handoff you asked for with `/contextrail:handoff`. |
+
+The settings are offered when you install it, and are in `/config` afterwards.
 
 ## When it triggers, and why
 
@@ -107,7 +132,7 @@ All data stays on your machine, under `~/.contextrail/` (or `CONTEXTRAIL_HOME`).
 ~/.contextrail/projects/<project-path-slug>/
   HANDOFF.md          current handoff (overwritten each time)
   RESUME_PROMPT.txt   the resume prompt
-  history/            previous handoffs (never loaded automatically)
+  history/            previous handoffs, each with its meta (never loaded automatically)
   meta.json           git state at save time, used for drift checks
   state.json          per-session trigger state
   config.json         optional per-project settings
@@ -123,7 +148,7 @@ A project is the git repository root, or the folder itself if it isn't a reposit
 Compaction is a generic summary written at the last moment, and you stay in the same long session. A handoff is written earlier, follows a fixed structure, separates verified from unverified work, and keeps decisions and dead ends that summaries tend to drop. The two work together: ContextRail also saves before compaction and reloads afterwards.
 
 **Why doesn't it run `/clear` itself?**
-Hooks can't run slash commands. Leaving `/clear` to you also means you decide when to switch.
+Hooks can't run slash commands, and leaving `/clear` to you means you decide when to switch. If you'd rather it switched by itself, install the optional `contextrail-continue` plugin (see Hands-free continue).
 
 **What if the agent ignores the request?**
 ContextRail asks at most three times per session, then tells you to run `/contextrail:handoff` when you are ready. An incomplete handoff gets one request for a fix. After that it is saved anyway, with a warning.
@@ -144,7 +169,7 @@ Each hook is one short Python process, usually under 0.1 s, even with transcript
 It should work if `python3` is on your `PATH`. File locking and the clipboard use fallbacks. It is not yet tested in CI.
 
 **Will it overwrite my notes?**
-The previous `HANDOFF.md` moves to `history/` each time a new one is saved. The last 20 are kept.
+The previous `HANDOFF.md` moves to `history/` each time a new one is saved. The last 20 are kept. `/contextrail:history` lists them, and `--restore N` brings one back; the one it replaces moves to `history/` in turn.
 
 ## Development
 
@@ -157,9 +182,10 @@ Everything is standard-library Python 3.9+, with no dependencies. To try changes
 ```
 .claude-plugin/        plugin and marketplace manifests
 hooks/hooks.json       Stop, PostToolUse, PreCompact and SessionStart hooks
-commands/              /contextrail:handoff, /contextrail:status and /contextrail:doctor
-contextrail/cr.py      entry point for hooks and the status and doctor commands
-contextrail/*.py       usage, facts, handoff, storage, config, prompts, status and doctor
+commands/              /contextrail:handoff, :status, :doctor and :history
+contextrail/cr.py      entry point for hooks and the status, doctor and history commands
+contextrail/*.py       usage, facts, handoff, storage, config, prompts, status, doctor and history
+mods/                  contextrail-continue, the optional mod that clears and continues
 tests/                 unittest suite with synthetic transcripts
 ```
 

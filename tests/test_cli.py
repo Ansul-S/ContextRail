@@ -72,15 +72,31 @@ class CliTest(TempHome):
 
 class PluginFilesTest(TempHome):
     def test_manifests_are_valid_json(self):
-        for path in (".claude-plugin/plugin.json", ".claude-plugin/marketplace.json", "hooks/hooks.json"):
+        for path in (".claude-plugin/plugin.json", ".claude-plugin/marketplace.json", "hooks/hooks.json",
+                     "mods/contextrail-continue/.claude-plugin/plugin.json"):
             json.loads((ROOT / path).read_text())
 
     def test_versions_match(self):
         from contextrail import __version__
         plugin = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
+        mod = json.loads((ROOT / "mods/contextrail-continue/.claude-plugin/plugin.json").read_text())
         market = json.loads((ROOT / ".claude-plugin/marketplace.json").read_text())
         self.assertEqual(plugin["version"], __version__)
-        self.assertEqual(market["plugins"][0]["version"], __version__)
+        self.assertEqual(mod["version"], __version__)
+        self.assertEqual([entry["version"] for entry in market["plugins"]], [__version__, __version__])
+
+    def test_marketplace_lists_the_mod(self):
+        market = json.loads((ROOT / ".claude-plugin/marketplace.json").read_text())
+        entry = market["plugins"][1]
+        self.assertEqual(entry["name"], "contextrail-continue")
+        self.assertTrue((ROOT / entry["source"] / ".claude-plugin/plugin.json").is_file())
+        self.assertEqual(json.loads((ROOT / entry["source"] / "hooks/hooks.json").read_text()), {"modules": ["./register.ts"]})
+
+    def test_mod_reads_the_request_prefix_contextrail_sends(self):
+        register = (ROOT / "mods/contextrail-continue/hooks/register.ts").read_text()
+        prefix = register.split("const REQUEST = '")[1].split("'")[0]
+        self.assertTrue(prompts.request("x tokens", 8_000, refresh=False).startswith(prefix))
+        self.assertTrue(prompts.request("x tokens", 8_000, refresh=True).startswith(prefix))
 
     def test_hooks_point_at_real_commands(self):
         hooks = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]
@@ -95,7 +111,7 @@ class PluginFilesTest(TempHome):
 
     def test_commands_run_cr_py(self):
         # A shell block that exits non-zero stops the slash command before the model sees it.
-        for name, line in (("status", "status"), ("doctor", "doctor --exit-zero")):
+        for name, line in (("status", "status"), ("doctor", "doctor --exit-zero"), ("history", "history --exit-zero $ARGUMENTS")):
             command = (ROOT / f"commands/{name}.md").read_text()
             self.assertIn(f'```!\n"${{CLAUDE_PLUGIN_ROOT}}/contextrail/cr.py" {line}\n```', command)
 

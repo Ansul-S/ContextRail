@@ -26,6 +26,15 @@ CONTEXTRAIL_HOME=/tmp/cr-home CONTEXTRAIL_SOFT_TOKENS=1000 claude --plugin-dir /
 
 A low `CONTEXTRAIL_SOFT_TOKENS` makes the handoff request fire on the first turn. Use `/contextrail:status` to see what ContextRail sees, and `/contextrail:doctor` to check the setup.
 
+## The mod
+
+`mods/contextrail-continue/` is an optional plugin of a newer kind, a TypeScript hooks module (a mod), that clears the session and continues after a handoff. It recognises ContextRail's handoff request by its opening words, and a Python test keeps the two in step. Check it with:
+
+```
+claude plugin validate mods/contextrail-continue
+claude plugin test mods/contextrail-continue
+```
+
 ## Changing the prompt
 
 `contextrail/prompts.py` holds the text sent to the agent. `commands/handoff.md` repeats the template and rules, and a test checks that the two match.

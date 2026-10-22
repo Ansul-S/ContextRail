@@ -43,6 +43,7 @@ RULES = """- Be specific and brief: file paths, function names, commands, number
 
 
 def request(usage_line: str, max_chars: int, refresh: bool) -> str:
+    # mods/contextrail-continue recognises the request by its first words; a test keeps them in step.
     opening = (
         f"ContextRail: this session is at {usage_line}. "
         "The user set up ContextRail to save a handoff at this point, before answer quality "

@@ -3,6 +3,7 @@
 
 Hooks (JSON payload on stdin):  cr.py stop | post-tool | pre-compact | session-start
 Manual:                         cr.py status [DIR] | doctor [DIR] [--exit-zero]
+                                cr.py history [--restore N] [DIR]
 """
 
 import json
@@ -14,7 +15,7 @@ from pathlib import Path
 # Import the package from the plugin root, not modules from this folder.
 sys.path[0] = str(Path(__file__).resolve().parent.parent)
 
-from contextrail import __version__, config, doctor, handlers, status  # noqa: E402
+from contextrail import __version__, config, doctor, handlers, history, status  # noqa: E402
 
 ERROR_LOG_LIMIT = 256 * 1024
 
@@ -44,6 +45,8 @@ def main(argv):
         return status.main(argv[2:])
     if argv[1] == "doctor":
         return doctor.main(argv[2:])
+    if argv[1] == "history":
+        return history.main(argv[2:])
     if argv[1] not in handlers.HOOKS:
         print(f"cr.py: unknown command {argv[1]!r}", file=sys.stderr)
         return 2
