@@ -55,6 +55,27 @@ class SectionsTest(unittest.TestCase):
         self.assertIn("Resume prompt", issues[2])
 
 
+class MentionsTest(unittest.TestCase):
+    def test_done_and_in_progress_items_naming_a_file(self):
+        body = (
+            "## Done\n- Limiter in `api/limits.py`, tests pass.\n- Docs in README.md.\n- Fixed app.py.\n"
+            "## In progress\n1. Wiring `app.py:create_app()`\n2. myapp.py and app.pyc untouched\n"
+            "## Next steps\n1. Edit api/app.py\n"
+        )
+        self.assertEqual(
+            handoff.mentions(body, ["src/api/limits.py", "api/app.py"]),
+            ["Limiter in `api/limits.py`, tests pass.", "Fixed app.py.", "Wiring `app.py:create_app()`"],
+        )
+        self.assertEqual(handoff.mentions(body, []), [])
+        self.assertEqual(handoff.mentions(body, ["setup.cfg"]), [])
+
+    def test_long_items_keep_the_file_name(self):
+        late = "## Done\n- " + "A long account of what was done and checked, " * 2 + "ending in `api/limits.py` and more text"
+        (excerpt,) = handoff.mentions(late, ["api/limits.py"])
+        self.assertEqual(len(excerpt), handoff.EXCERPT_CHARS)
+        self.assertTrue(excerpt.startswith("…") and excerpt.endswith("api/limits.py…"))
+
+
 class RenderTest(unittest.TestCase):
     def test_facts_on_top_narrative_below(self):
         git = GitState(branch="main", head="abcdef1234567", subject="Add limiter", dirty=["api/app.py"], diff_hash="h")

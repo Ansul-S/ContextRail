@@ -267,8 +267,53 @@ class SessionStartTest(TempHome):
         (self.repo / "app.py").write_text("print('v2')\n")
         git(self.repo, "commit", "-qam", "follow-up fix")
         out = self.start("clear")
-        self.assertIn("1 new commit(s) since the handoff: ", out["hookSpecificOutput"]["additionalContext"])
-        self.assertIn("1 repo change(s) since", out["systemMessage"])
+        context = out["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("1 new commit(s) since the handoff: ", context)
+        self.assertIn("- Files changed since the handoff (1): app.py. Tracked files: 1 file changed,", context)
+        self.assertIn("- Start by running the Verify first commands.\n", context)
+        self.assertIn("1 file(s) changed since", out["systemMessage"])
+
+    def test_flags_items_naming_a_changed_file(self):
+        (self.repo / "api").mkdir()
+        for name in ("api/limits.py", "api/app.py", "README.md"):
+            (self.repo / name).write_text("x = 1\n")
+        git(self.repo, "add", ".")
+        git(self.repo, "commit", "-qm", "api")
+        self.save()
+        for name in ("api/limits.py", "README.md"):
+            (self.repo / name).write_text("x = 2\n")
+        git(self.repo, "commit", "-qam", "tweak")
+        context = self.start("clear")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("- Files changed since the handoff (2): README.md, api/limits.py.", context)
+        self.assertIn(
+            '- These items mention files that changed since the handoff; re-check them: "`TokenBucket` in '
+            '`api/limits.py`; `pytest -q tests/test_lim…".\n', context
+        )
+        self.assertNotIn("create_app", context.split("<!-- contextrail:narrative -->")[0])
+
+    def test_drift_block_stays_under_1000_characters(self):
+        folder = self.repo / ("deeply/nested/" * 3)
+        folder.mkdir(parents=True)
+        names = [f"module_with_a_long_name_{i}.py" for i in range(30)]
+        for name in names[:5]:
+            (folder / name).write_text("draft\n")  # uncommitted at the handoff, committed later
+        done = "".join(f"- Finished the long description of the work in {name}.\n" for name in names)
+        self.at_tokens(102_000)
+        handlers.on_stop(self.payload("Stop", last_assistant_message=block_message(
+            VALID_BODY.replace("## In progress\n", f"## In progress\n{done}"))))
+        git(self.repo, "checkout", "-qb", "feature/" + "very-long-branch-name-" * 4)
+        git(self.repo, "add", ".")
+        git(self.repo, "commit", "-qm", "Commit the drafts as they were")
+        for i, name in enumerate(names[5:]):
+            (folder / name).write_text(f"n = {i}\n")
+            git(self.repo, "add", ".")
+            git(self.repo, "commit", "-qm", f"Change number {i} with a commit subject long enough to need cutting")
+        context = self.start("clear")["hookSpecificOutput"]["additionalContext"]
+        block = context.split("Changes in the repository since the handoff:\n")[1].split("\n\n")[0]
+        for start in ("- Branch changed", "- 26 new commit(s)", "- No longer uncommitted", "- Files changed", "- These items"):
+            self.assertIn(start, block)
+        self.assertIn("- Start by running the Verify first commands.", block)
+        self.assertLessEqual(len(block), 1_000, block)
 
     def test_skips_stale_handoffs(self):
         self.save()

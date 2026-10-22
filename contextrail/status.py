@@ -45,6 +45,6 @@ def main(args: List[str]) -> int:
     age = describe_age(age_seconds(str(meta.get("saved_at") or "")))
     print(f"Handoff:   saved {age}, {size:,} characters, {archived} older in history")
     print(f"           {tilde(project.handoff)}")
-    for note in facts.drift(meta, root):
+    for note in facts.drift(meta, root).notes:
         print(f"Drift:     {note}")
     return 0

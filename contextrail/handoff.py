@@ -32,6 +32,10 @@ ALIASES = {
     "verify": "verify first",
 }
 MAX_RESUME_CHARS = 800
+# Sections whose items the drift check holds against the files changed since.
+CLAIM_SECTIONS = ("done", "in progress")
+BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+EXCERPT_CHARS = 60
 
 
 def extract(text: Optional[str]) -> Optional[str]:
@@ -68,6 +72,35 @@ def problems(body: str, max_chars: int) -> List[str]:
 
 def resume_prompt(body: str) -> str:
     return sections(body).get("resume prompt", "").strip()
+
+
+def mentions(narrative: str, paths: List[str]) -> List[str]:
+    """Done and In progress items that name one of these files, by path or file name, as excerpts."""
+    if not paths:
+        return []
+    names = sorted(set(paths) | {path.rsplit("/", 1)[-1] for path in paths}, key=len, reverse=True)
+    # A whole name only: app.py is not in myapp.py or app.pyc, but is in src/app.py.
+    pattern = re.compile(r"(?<![\w.-])(?:" + "|".join(map(re.escape, names)) + r")(?![\w/-]|\.\w)")
+    found = sections(narrative)
+    items: List[str] = []
+    for key in CLAIM_SECTIONS:
+        for line in found.get(key, "").splitlines():
+            text = BULLET_RE.sub("", line).strip()
+            match = pattern.search(text)
+            excerpt = _excerpt(text, match) if match else None
+            if excerpt and excerpt not in items:
+                items.append(excerpt)
+    return items
+
+
+def _excerpt(text: str, match: "re.Match[str]") -> str:
+    """The item cut to EXCERPT_CHARS, keeping the file name it was flagged for."""
+    if len(text) <= EXCERPT_CHARS:
+        return text
+    if match.end() < EXCERPT_CHARS:
+        return text[: EXCERPT_CHARS - 1] + "…"
+    tail = "…" if match.end() < len(text) else ""
+    return "…" + text[match.end() - EXCERPT_CHARS + 2 : match.end()] + tail
 
 
 def narrative_of(document: str) -> str:

@@ -123,6 +123,7 @@ def _save(
         "head": git.head if git else None,
         "dirty": git.dirty if git else [],
         "diff_hash": git.diff_hash if git else None,
+        "file_hashes": facts.uncommitted_hashes(root) if git and git.head else None,
     }
     resume = handoff.resume_prompt(body)
     store.save_handoff(project, document, meta, resume, cfg["history_keep"])
@@ -305,13 +306,17 @@ def on_session_start(payload: Payload) -> Output:
         document = project.handoff.read_text(encoding="utf-8")
     except OSError:
         return None
-    notes = facts.drift(meta, root)
+    found = facts.drift(meta, root)
+    flagged = handoff.mentions(handoff.narrative_of(document), found.changed)
     age = describe_age(seconds)
-    changes = f"{len(notes)} repo change(s) since" if notes else "no repo changes since"
+    if found.changed:
+        changes = f"{len(found.changed)} file(s) changed since"
+    else:
+        changes = f"{len(found.notes)} repo change(s) since" if found.notes else "no repo changes since"
     return {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": prompts.loaded(saved_at, age, notes, document),
+            "additionalContext": prompts.loaded(saved_at, age, found.notes, flagged, document),
         },
         "systemMessage": f"ContextRail: loaded the handoff saved {age} ({changes}).",
     }

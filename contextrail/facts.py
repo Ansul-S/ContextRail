@@ -12,7 +12,7 @@ import shlex
 import subprocess
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 
@@ -55,6 +55,16 @@ PASS_RE = re.compile(
 MAX_CHECK_CHARS = 80
 MAX_CHECKS = 6
 MAX_LISTED = 15
+# Uncommitted files hashed when a handoff is saved, so the next session can tell
+# which of them changed since. Above this, the drift check falls back to git state.
+MAX_HASHED = 300
+MAX_HASH_BYTES = 8 * 1024 * 1024
+# Characters per drift note, so the whole block stays near 1,000.
+BRANCH_CHARS = 30
+COMMITS_BUDGET = 180
+FILES_BUDGET = 200
+DIRTY_BUDGET = 120
+ITEM_CHARS = 60
 
 
 def run_git(args: List[str], cwd: Path) -> Optional[str]:
@@ -400,21 +410,83 @@ def session_activity(transcript_path: Optional[str], root: Path) -> Activity:
     return Activity(edited=list(edited), outside=len(outside), checks=list(latest.items())[-MAX_CHECKS:])
 
 
-def _short_list(items: List[str]) -> str:
-    shown = ", ".join(items[:8])
-    return shown + (f" and {len(items) - 8} more" if len(items) > 8 else "")
+def _clip(text: str, limit: int, keep_end: bool = False) -> str:
+    if len(text) <= limit:
+        return text
+    return "…" + text[-(limit - 1):] if keep_end else text[: limit - 1] + "…"
 
 
-def drift(meta: Dict, root: Path) -> List[str]:
+def _fit(items: List[str], budget: int, sep: str = ", ") -> str:
+    """As many items as fit in about budget characters, then how many are left."""
+    shown: List[str] = []
+    used = 0
+    for item in items:
+        if shown and used + len(sep) + len(item) > budget:
+            break
+        shown.append(item)
+        used += len(sep) + len(item)
+    rest = len(items) - len(shown)
+    return sep.join(shown) + (f" and {rest} more" if rest else "")
+
+
+def _content_hash(path: Path) -> str:
+    try:
+        if not path.is_file():
+            return "missing"
+        info = path.stat()
+        if info.st_size > MAX_HASH_BYTES:
+            return f"size {info.st_size}, mtime {info.st_mtime_ns}"
+        return hashlib.sha1(path.read_bytes()).hexdigest()
+    except OSError:
+        return "unreadable"
+
+
+def _paths(output: Optional[str]) -> Optional[set]:
+    return None if output is None else {path for path in output.split("\0") if path}
+
+
+def uncommitted_hashes(root: Path) -> Optional[Dict[str, str]]:
+    """A content hash of every uncommitted file, tracked or new, for the drift
+    check; None when there are too many or git can't say."""
+    tracked = _paths(run_git(["diff", "--name-only", "-z", "HEAD"], root))
+    untracked = _paths(run_git(["ls-files", "--others", "--exclude-standard", "-z"], root))
+    if tracked is None or untracked is None or len(tracked | untracked) > MAX_HASHED:
+        return None
+    return {path: _content_hash(root / path) for path in sorted(tracked | untracked)}
+
+
+def changed_files(meta: Dict, root: Path) -> Optional[List[str]]:
+    """Files whose content changed since the handoff: committed or not, new,
+    deleted or reverted. None for a handoff saved without file hashes."""
+    hashes = meta.get("file_hashes")
+    if not isinstance(hashes, dict) or not meta.get("head"):
+        return None
+    differ = _paths(run_git(["diff", "--name-only", "-z", meta["head"]], root))
+    untracked = _paths(run_git(["ls-files", "--others", "--exclude-standard", "-z"], root))
+    if differ is None or untracked is None:
+        return None
+    candidates = differ | untracked
+    changed = {path for path in candidates if path not in hashes or hashes[path] != _content_hash(root / path)}
+    # Uncommitted at the handoff and now neither different nor new: reverted, or deleted.
+    changed.update(path for path in hashes if path not in candidates)
+    return sorted(changed)
+
+
+class Drift(NamedTuple):
+    notes: List[str]
+    changed: List[str]  # files changed since the handoff, when that is known
+
+
+def drift(meta: Dict, root: Path) -> Drift:
     """What changed in the repository since the handoff was saved."""
     if not meta.get("head"):
-        return []
+        return Drift([], [])
     now = git_state(root)
     if now is None:
-        return []
+        return Drift([], [])
     notes = []
     if meta.get("branch") and now.branch != meta["branch"]:
-        notes.append(f"Branch changed: {meta['branch']} → {now.branch}.")
+        notes.append(f"Branch changed: {_clip(meta['branch'], BRANCH_CHARS)} → {_clip(now.branch, BRANCH_CHARS)}.")
     if now.head != meta["head"]:
         log = run_git(["log", "--format=%h %s", f"{meta['head']}..HEAD"], root)
         if log is None:
@@ -423,20 +495,30 @@ def drift(meta: Dict, root: Path) -> List[str]:
                 "is no longer in its history (rebase or reset?)."
             )
         else:
-            commits = [line for line in log.splitlines() if line.strip()]
+            commits = [_clip(line, ITEM_CHARS) for line in log.splitlines() if line.strip()]
             if commits:
-                listed = "; ".join(commits[:5]) + ("; ..." if len(commits) > 5 else "")
-                notes.append(f"{len(commits)} new commit(s) since the handoff: {listed}")
+                notes.append(f"{len(commits)} new commit(s) since the handoff: {_fit(commits, COMMITS_BUDGET, '; ')}")
             else:
                 notes.append(f"HEAD moved back to {now.head[:9]} (reset or checkout?).")
     if meta.get("dirty") is None:  # not recorded: a handoff restored from an old archive
-        return notes
+        return Drift(notes, [])
     before = set(meta["dirty"])
     after = set(now.dirty)
     if before - after:
-        notes.append(f"No longer uncommitted (committed or reverted): {_short_list(sorted(before - after))}.")
-    if after - before:
-        notes.append(f"Newly uncommitted: {_short_list(sorted(after - before))}.")
-    if before == after and before and meta.get("diff_hash") and meta["diff_hash"] != now.diff_hash:
-        notes.append("The uncommitted changes were edited after the handoff was saved.")
-    return notes
+        gone = [_clip(path, ITEM_CHARS, keep_end=True) for path in sorted(before - after)]
+        notes.append(f"No longer uncommitted (committed or reverted): {_fit(gone, DIRTY_BUDGET)}.")
+    changed = changed_files(meta, root)
+    if changed is None:  # saved without file hashes: compare the git state only
+        if after - before:
+            notes.append(f"Newly uncommitted: {_fit(sorted(after - before), DIRTY_BUDGET)}.")
+        if before == after and before and meta.get("diff_hash") and meta["diff_hash"] != now.diff_hash:
+            notes.append("The uncommitted changes were edited after the handoff was saved.")
+        return Drift(notes, [])
+    if changed:
+        listed = _fit([_clip(path, ITEM_CHARS, keep_end=True) for path in changed], FILES_BUDGET)
+        note = f"Files changed since the handoff ({len(changed)}): {listed}."
+        stat = run_git(["diff", "--shortstat", meta["head"]], root) if not before else None
+        if stat and stat.strip():  # with nothing uncommitted at the handoff, this is all since
+            note += f" Tracked files: {stat.strip()}."
+        notes.append(note)
+    return Drift(notes, changed)

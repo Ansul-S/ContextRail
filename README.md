@@ -167,6 +167,9 @@ ContextRail asks at most three times per session, then tells you to run `/contex
 **Does it work alongside other context monitors (such as GSD's)?**
 Yes. ContextRail fires earlier than most warnings, so the handoff usually exists by the time they appear. Some monitors tell the agent not to write handoffs unless asked. ContextRail's request says the user set it up, which counts as asking.
 
+**What does "what changed since" cover?**
+When a handoff is saved, ContextRail notes the commit and a fingerprint of each uncommitted file. When the next session loads it, ContextRail lists the new commits, which files changed since (committed or not, new, deleted or reverted), and the Done and In progress items that name one of those files, and tells the agent to re-check them and run the Verify first commands. A file that was already uncommitted and hasn't changed doesn't count. The whole list stays under about 1,000 characters.
+
 **How does it know whether a check passed?**
 It picks the test, lint or build command out of each shell command, skipping `cd`, variable assignments and heredoc bodies. If the command's exit status belongs to that check, it uses the exit status. If a pipe (`| tail`) or a later command hides it, ContextRail reads the summary line that the tool prints (unittest, pytest, jest, vitest, go, cargo, mypy, ruff and others). If there is no summary line, the check is listed as "ran", not "passed".
 

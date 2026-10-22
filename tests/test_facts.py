@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 from contextrail import facts
 from tests.helpers import TempHome, git, tool_result, tool_use, user, write_transcript
@@ -170,14 +171,14 @@ class DriftTest(TempHome):
         return {"branch": state.branch, "head": state.head, "dirty": state.dirty, "diff_hash": state.diff_hash}
 
     def test_no_changes(self):
-        self.assertEqual(facts.drift(self.meta(), self.repo), [])
+        self.assertEqual(facts.drift(self.meta(), self.repo).notes, [])
 
     def test_new_commits_and_dirty_files(self):
         meta = self.meta()
         (self.repo / "app.py").write_text("print('v2')\n")
         git(self.repo, "commit", "-qam", "second change")
         (self.repo / "todo.txt").write_text("x\n")
-        notes = facts.drift(meta, self.repo)
+        notes = facts.drift(meta, self.repo).notes
         self.assertEqual(len(notes), 2)
         self.assertIn("1 new commit(s) since the handoff", notes[0])
         self.assertIn("second change", notes[0])
@@ -187,12 +188,58 @@ class DriftTest(TempHome):
         (self.repo / "app.py").write_text("print('wip')\n")
         meta = self.meta()
         (self.repo / "app.py").write_text("print('more wip')\n")
-        self.assertEqual(facts.drift(meta, self.repo), ["The uncommitted changes were edited after the handoff was saved."])
+        self.assertEqual(facts.drift(meta, self.repo).notes, ["The uncommitted changes were edited after the handoff was saved."])
+
+    def hashed_meta(self):
+        meta = self.meta()
+        meta["file_hashes"] = facts.uncommitted_hashes(self.repo)
+        return meta
+
+    def test_reload_right_after_a_handoff_with_uncommitted_work_is_quiet(self):
+        (self.repo / "app.py").write_text("print('wip')\n")
+        (self.repo / "notes.txt").write_text("todo\n")
+        found = facts.drift(self.hashed_meta(), self.repo)
+        self.assertEqual(found, facts.Drift([], []))
+
+    def test_changed_files_by_content(self):
+        for name in ("edited.py", "reverted.py", "committed.py", "clean.py"):
+            (self.repo / name).write_text(f"# {name}\n")
+        (self.repo / ".gitignore").write_text("*.log\n")
+        git(self.repo, "add", ".")
+        git(self.repo, "commit", "-qm", "files")
+        for name in ("edited.py", "reverted.py", "committed.py"):
+            (self.repo / name).write_text(f"# {name}, uncommitted at the handoff\n")
+        for name in ("deleted.txt", "kept.txt"):
+            (self.repo / name).write_text("untracked\n")
+        meta = self.hashed_meta()
+        (self.repo / "edited.py").write_text("# edited again\n")
+        git(self.repo, "checkout", "--", "reverted.py")
+        git(self.repo, "commit", "-qm", "commit as it was", "committed.py")
+        (self.repo / "deleted.txt").unlink()
+        (self.repo / "clean.py").write_text("# changed after the handoff\n")
+        (self.repo / "new.txt").write_text("new\n")
+        (self.repo / "build.log").write_text("ignored\n")
+        found = facts.drift(meta, self.repo)
+        self.assertEqual(found.changed, ["clean.py", "deleted.txt", "edited.py", "new.txt", "reverted.py"])
+        self.assertIn("No longer uncommitted (committed or reverted): committed.py, deleted.txt, reverted.py.", found.notes)
+        self.assertIn(
+            "Files changed since the handoff (5): clean.py, deleted.txt, edited.py, new.txt, reverted.py.", found.notes
+        )
+        self.assertFalse(any(note.startswith("Newly uncommitted") for note in found.notes))
+
+    def test_falls_back_to_git_state_without_file_hashes(self):
+        (self.repo / "a.txt").write_text("a\n")
+        (self.repo / "b.txt").write_text("b\n")
+        with mock.patch.object(facts, "MAX_HASHED", 1):
+            meta = self.hashed_meta()
+        self.assertIsNone(meta["file_hashes"])
+        (self.repo / "c.txt").write_text("c\n")
+        self.assertEqual(facts.drift(meta, self.repo), facts.Drift(["Newly uncommitted: c.txt."], []))
 
     def test_branch_switch_and_rewritten_history(self):
         meta = self.meta()
         meta["head"] = "0" * 40
         git(self.repo, "checkout", "-qb", "feature")
-        notes = facts.drift(meta, self.repo)
+        notes = facts.drift(meta, self.repo).notes
         self.assertIn("Branch changed: main → feature.", notes)
         self.assertTrue(any("no longer in its history" in note for note in notes))

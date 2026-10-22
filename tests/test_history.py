@@ -75,7 +75,7 @@ class HistoryTest(TempHome):
         meta = json.loads(self.project().meta.read_text())
         self.assertIsNone(meta["dirty"])
         self.assertEqual(len(meta["head"]), 9)
-        notes = facts.drift(meta, self.repo)
+        notes = facts.drift(meta, self.repo).notes
         self.assertEqual(len(notes), 1)
         self.assertIn("1 new commit(s) since the handoff: ", notes[0])
 

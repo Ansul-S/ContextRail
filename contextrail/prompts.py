@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import List
 
+MAX_FLAGGED = 2
+
 TEMPLATE = """<contextrail-handoff>
 ## Goal
 What we are building or fixing, and why (1-2 sentences).
@@ -88,8 +90,15 @@ def wrap_up(usage_line: str) -> str:
     )
 
 
-def loaded(saved_at: str, age: str, drift_notes: List[str], document: str) -> str:
-    drift_text = "\n".join(f"- {note}" for note in drift_notes) if drift_notes else "- None detected."
+def loaded(saved_at: str, age: str, drift_notes: List[str], flagged: List[str], document: str) -> str:
+    lines = list(drift_notes)
+    if flagged:
+        quoted = "; ".join(f'"{item}"' for item in flagged[:MAX_FLAGGED])
+        more = f" and {len(flagged) - MAX_FLAGGED} more" if len(flagged) > MAX_FLAGGED else ""
+        lines.append(f"These items mention files that changed since the handoff; re-check them: {quoted}{more}.")
+    if lines:
+        lines.append("Start by running the Verify first commands.")
+    drift_text = "\n".join(f"- {line}" for line in lines) if lines else "- None detected."
     return (
         f'<contextrail-previous-handoff saved="{saved_at}" age="{age}">\n'
         "ContextRail loaded the handoff written at the end of the previous session in this "
