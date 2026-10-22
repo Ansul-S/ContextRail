@@ -21,6 +21,9 @@ Payload = Dict[str, Any]
 Output = Optional[Dict[str, Any]]
 
 WARN_EVERY_TOKENS = 30_000
+# Stop payloads list in-flight background work; a task without a status counts too.
+IN_FLIGHT = ("running", "pending")
+MAX_TASK_CHARS = 60
 HEARTBEAT = "heartbeat.json"
 HEARTBEAT_EVERY = 60
 
@@ -195,6 +198,14 @@ def _maybe_request(payload: Payload, cfg: Dict[str, Any], entry: Dict[str, Any])
                 "Run /contextrail:handoff when you are ready."
             )
         }
+    running = _in_flight(payload.get("background_tasks"))
+    if running and usage.tokens < limits.hard:
+        # Their results would change what the handoff says, and finishing wakes the session,
+        # whose next stop asks. The hard limit caps the wait.
+        if entry["deferred_notice"]:
+            return None
+        entry["deferred_notice"] = True
+        return {"systemMessage": _waiting(running, limits.hard)}
     entry["attempts"] += 1
     entry["retries"] = 0
     return {
@@ -202,6 +213,28 @@ def _maybe_request(payload: Payload, cfg: Dict[str, Any], entry: Dict[str, Any])
         "reason": prompts.request(usage.describe(), cfg["max_chars"], refresh=saved is not None),
         "systemMessage": f"ContextRail: context is at {usage.tokens:,} tokens; asking for a handoff.",
     }
+
+
+def _in_flight(tasks: Any) -> List[Dict[str, Any]]:
+    if not isinstance(tasks, list):
+        return []
+    return [
+        task for task in tasks
+        if isinstance(task, dict) and str(task.get("status") or "running").lower() in IN_FLIGHT
+    ]
+
+
+def _waiting(running: List[Dict[str, Any]], hard: int) -> str:
+    labels = []
+    for task in running[:3]:
+        text = " ".join(str(task.get("description") or task.get("type") or "task").split())
+        labels.append(f"`{text if len(text) <= MAX_TASK_CHARS else text[: MAX_TASK_CHARS - 1] + '…'}`")
+    more = f" and {len(running) - 3} more" if len(running) > 3 else ""
+    count = f"{len(running)} background task{'' if len(running) == 1 else 's'}"
+    return (
+        f"ContextRail: waiting for {count} ({', '.join(labels)}{more}) to finish before asking for a "
+        f"handoff, at most until {hard:,} tokens. Run /contextrail:handoff to write one now."
+    )
 
 
 def on_post_tool(payload: Payload) -> Output:

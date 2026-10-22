@@ -40,6 +40,7 @@ To try it without installing, clone the repository and start Claude Code with `c
 Most of the time you do nothing:
 
 - **At 100k tokens**, when the agent finishes a turn, ContextRail asks it for a handoff. The agent replies with it, and ContextRail saves it and tells you.
+- **If background tasks are still running** (a test run in the background, a subagent), ContextRail waits until they finish, because their results belong in the handoff. It says so once, and stops waiting at 130k.
 - **Type `/clear`.** The new session starts with the handoff loaded. Paste the resume prompt from your clipboard, or just say "continue".
 - **If you keep going instead**, ContextRail asks for a fresh handoff every 40k tokens.
 - **At 130k tokens in the middle of a long turn**, the agent is told to finish the current step and stop starting new work.
@@ -83,7 +84,7 @@ The settings are offered when you install it, and are in `/config` afterwards.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `soft_tokens` / `soft_pct` | 100,000 / 50% | Ask for a handoff at whichever comes first. |
-| `hard_tokens` / `hard_pct` | 130,000 / 65% | Tell the agent mid-turn to wrap up. |
+| `hard_tokens` / `hard_pct` | 130,000 / 65% | Tell the agent mid-turn to wrap up. Also the longest ContextRail waits for background tasks. |
 | `refresh_tokens` | 40,000 | If you keep working after a handoff, ask again after this much growth. |
 
 Why these numbers:

@@ -10,6 +10,10 @@ def block_message(body=VALID_BODY):
     return f"Here is the handoff.\n\n<contextrail-handoff>\n{body}\n</contextrail-handoff>"
 
 
+# One element of a Stop payload's background_tasks, as Claude Code 2.1.308 sends it.
+TASK = {"id": "b3v0zo00w", "type": "shell", "status": "running", "description": "pytest -q", "command": "pytest -q"}
+
+
 class StopTest(TempHome):
     def stop(self, **extra):
         return handlers.on_stop(self.payload("Stop", **extra))
@@ -106,6 +110,42 @@ class StopTest(TempHome):
         self.assertNotIn("decision", out)
         self.assertIn("/contextrail:handoff", out["systemMessage"])
         self.assertIsNone(self.stop(last_assistant_message="ok"))
+
+    def test_waits_for_background_tasks_below_the_hard_limit(self):
+        self.at_tokens(102_000)
+        out = self.stop(last_assistant_message="ok", background_tasks=[TASK])
+        self.assertNotIn("decision", out)
+        self.assertEqual(out["systemMessage"], (
+            "ContextRail: waiting for 1 background task (`pytest -q`) to finish before asking for a handoff, "
+            "at most until 130,000 tokens. Run /contextrail:handoff to write one now."
+        ))
+        self.assertIsNone(self.stop(last_assistant_message="ok", background_tasks=[TASK]))
+        # The task finishing wakes the session; that stop asks, and waiting used no attempt.
+        out = self.stop(last_assistant_message="ok", background_tasks=[])
+        self.assertEqual(out["decision"], "block")
+        self.assertEqual(store.load_state(self.project())["sessions"]["session-1"]["attempts"], 1)
+
+    def test_asks_anyway_at_the_hard_limit(self):
+        self.at_tokens(131_000)
+        self.assertEqual(self.stop(last_assistant_message="ok", background_tasks=[TASK])["decision"], "block")
+
+    def test_only_tasks_in_flight_hold_the_request(self):
+        self.at_tokens(102_000)
+        finished = [dict(TASK, status="completed"), dict(TASK, status="failed"), None, "x"]
+        crons = [{"id": "c1", "schedule": "*/5 * * * *", "recurring": True, "prompt": "/babysit-prs"}]
+        out = self.stop(last_assistant_message="ok", background_tasks=finished, session_crons=crons)
+        self.assertEqual(out["decision"], "block")
+        self.assertEqual(handlers._in_flight("not a list"), [])
+        no_status = {"type": "subagent", "description": "review"}
+        self.assertEqual(handlers._in_flight([dict(TASK, status="Pending"), no_status]), [dict(TASK, status="Pending"), no_status])
+
+    def test_waiting_notice_lists_three_tasks(self):
+        tasks = [{"type": "subagent"}] + [dict(TASK, description=f"job {i} " + "x" * 80) for i in range(4)]
+        notice = handlers._waiting(tasks, 130_000)
+        self.assertIn("waiting for 5 background tasks (`subagent`, `job 0 xxx", notice)
+        self.assertIn("x…`, `job 1 ", notice)
+        self.assertIn("…` and 2 more) to finish", notice)
+        self.assertNotIn("job 2", notice)
 
     def test_sessions_are_tracked_separately(self):
         self.at_tokens(102_000)
