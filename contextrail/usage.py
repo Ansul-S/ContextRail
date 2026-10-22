@@ -2,23 +2,29 @@
 
 Claude Code counts context as input + cache_creation + cache_read tokens of
 the latest main-thread assistant message. Hook payloads do not carry the
-window size, so it comes from config or is inferred.
+window size, so it comes from config, from what the optional status-line
+wrapper recorded, or is inferred.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
-from .store import slug
+from . import config
+from .store import read_json, slug
 
 DEFAULT_WINDOW = 200_000
 LARGE_WINDOW = 1_000_000
 CHUNK = 256 * 1024
 MAX_SCAN = 16 * 1024 * 1024
+REPORT_FRESH = 24 * 3600
+SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 
 
 @dataclass(frozen=True)
@@ -26,7 +32,7 @@ class Usage:
     tokens: int
     model: str
     window: int
-    window_source: str  # config | model | observed | assumed
+    window_source: str  # config | statusline | model | observed | assumed
 
     @property
     def pct(self) -> float:
@@ -67,7 +73,25 @@ def reverse_lines(path: str, max_bytes: int = MAX_SCAN) -> Iterator[bytes]:
 
 def claude_projects() -> Path:
     """The folder where Claude Code keeps a transcript folder per working directory."""
-    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
+    return config.claude_dir() / "projects"
+
+
+def session_report(session_id: str) -> Optional[Path]:
+    """Where the status-line wrapper records a session's window size, or None
+    for an id that is not safe as a file name."""
+    if not SESSION_ID_RE.fullmatch(session_id):
+        return None
+    return config.home() / "sessions" / f"{session_id}.json"
+
+
+def reported_window(session_id: str) -> Optional[int]:
+    """The window size the status line reported for this session in the last 24 hours."""
+    path = session_report(session_id)
+    report = read_json(path) if path else {}
+    window, stamp = report.get("window"), report.get("ts")
+    if not isinstance(window, int) or window <= 0 or not isinstance(stamp, (int, float)):
+        return None
+    return window if time.time() - stamp < REPORT_FRESH else None
 
 
 def transcripts(cwd: Path) -> List[Path]:
@@ -78,9 +102,11 @@ def transcripts(cwd: Path) -> List[Path]:
     return sorted(found, key=lambda path: path.stat().st_mtime, reverse=True)
 
 
-def resolve_window(model: str, tokens: int, configured: Optional[int]) -> Tuple[int, str]:
+def resolve_window(model: str, tokens: int, configured: Optional[int], reported: Optional[int] = None) -> Tuple[int, str]:
     if configured:
         return configured, "config"
+    if reported:
+        return reported, "statusline"
     if "[1m]" in model.lower():
         return LARGE_WINDOW, "model"
     if tokens > DEFAULT_WINDOW:
@@ -110,7 +136,9 @@ def last_usage(transcript_path: Optional[str], configured_window: Optional[int] 
             if tokens <= 0:
                 continue  # synthetic or error messages carry no usage
             model = str(message.get("model") or "")
-            window, source = resolve_window(model, tokens, configured_window)
+            # Transcripts are named <session id>.jsonl, the id the status line reports under.
+            reported = None if configured_window else reported_window(Path(transcript_path).stem)
+            window, source = resolve_window(model, tokens, configured_window, reported)
             return Usage(tokens=tokens, model=model, window=window, window_source=source)
     except OSError:
         return None

@@ -15,9 +15,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple
 
-from . import __version__, config, facts, handlers, store
+from . import __version__, config, facts, handlers, statusline, store
 from .config import tilde
-from .usage import claude_projects, last_usage, transcripts
+from .usage import REPORT_FRESH, claude_projects, last_usage, transcripts
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 ISSUES_URL = "https://github.com/Ansul-S/ContextRail/issues"
@@ -29,10 +29,14 @@ STOP_GRACE = 10 * 60
 ERROR_HEADER = re.compile(r"--- (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) ?(.*)")
 WINDOW_SOURCES = {
     "config": "the window_tokens setting",
+    "statusline": "the status line",
     "model": "the model name",
     "observed": "usage above 200k",
-    "assumed": "the 200k default; set window_tokens if your model's window is larger",
+    "assumed": (
+        "the 200k default. For the exact size, run /contextrail:doctor --setup-statusline, or set window_tokens"
+    ),
 }
+SETUP_HINT = "run /contextrail:doctor --setup-statusline"
 LABELS = {"ok": "ok  ", "warn": "warn", "fail": "FAIL"}
 
 
@@ -220,6 +224,24 @@ def check_transcript(cwd: Path, cfg: Dict[str, Any]) -> Result:
     )
 
 
+def check_statusline() -> Result:
+    """The optional status-line wrapper, which tells the hooks the exact window size."""
+    report = statusline.newest_report()
+    if report and time.time() - report[0] < REPORT_FRESH:
+        stamp, window = report
+        age = handlers.describe_age(time.time() - stamp)
+        return Result("ok", "Status line", f"last reported a {window:,}-token window {age}")
+    entry, _ = statusline.current_status_line()
+    if not statusline.uses_wrapper(entry):
+        return Result("ok", "Status line", f"not set up (optional). For the exact window size, {SETUP_HINT}")
+    launcher = statusline.launcher_path()
+    if str(launcher) in str(entry.get("command")) and not os.access(launcher, os.X_OK):
+        return Result("fail", "Status line", f"settings.json runs {tilde(launcher)}, which is missing; {SETUP_HINT}")
+    return Result(
+        "warn", "Status line", "set up in settings.json, but it hasn't reported a window size in 24 hours. Restart Claude Code"
+    )
+
+
 def check_delivery(root: Path, cfg: Dict[str, Any]) -> Result:
     """Run the SessionStart handler (it changes nothing) and check what it would load."""
     project = store.Project(root)
@@ -308,6 +330,7 @@ def run(cwd: Path) -> Tuple[Path, List[Result]]:
         _guarded("Settings", check_settings, project, cfg),
         _guarded("Hooks", check_heartbeats),
         _guarded("Transcript", check_transcript, cwd, cfg),
+        _guarded("Status line", check_statusline),
         _guarded("Handoff", check_delivery, root, cfg),
         _guarded("Errors", check_errors),
     ]
@@ -317,10 +340,14 @@ def main(args: List[str]) -> int:
     """Exit 1 if a check fails, unless --exit-zero is given: a slash command's
     shell block that exits non-zero never reaches the model."""
     exit_zero = "--exit-zero" in args
-    args = [arg for arg in args if arg != "--exit-zero"]
+    setup = "--setup-statusline" in args
+    args = [arg for arg in args if arg not in ("--exit-zero", "--setup-statusline")]
     if any(arg.startswith("-") for arg in args):
-        print("usage: cr.py doctor [DIR] [--exit-zero]", file=sys.stderr)
+        print("usage: cr.py doctor [DIR] [--exit-zero] [--setup-statusline]", file=sys.stderr)
         return 2
+    if setup:
+        code = statusline.setup()
+        return 0 if exit_zero else code
     cwd = Path(args[0]).expanduser() if args else Path.cwd()
     root, results = run(cwd)
     print(f"ContextRail {__version__} doctor, for {root}")

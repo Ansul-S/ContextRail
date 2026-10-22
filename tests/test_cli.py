@@ -111,7 +111,7 @@ class PluginFilesTest(TempHome):
 
     def test_commands_run_cr_py(self):
         # A shell block that exits non-zero stops the slash command before the model sees it.
-        for name, line in (("status", "status"), ("doctor", "doctor --exit-zero"), ("history", "history --exit-zero $ARGUMENTS")):
+        for name, line in (("status", "status"), ("doctor", "doctor --exit-zero $ARGUMENTS"), ("history", "history --exit-zero $ARGUMENTS")):
             command = (ROOT / f"commands/{name}.md").read_text()
             self.assertIn(f'```!\n"${{CLAUDE_PLUGIN_ROOT}}/contextrail/cr.py" {line}\n```', command)
 

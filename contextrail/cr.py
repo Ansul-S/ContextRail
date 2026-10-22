@@ -2,7 +2,8 @@
 """ContextRail: automatic session handoff for Claude Code.
 
 Hooks (JSON payload on stdin):  cr.py stop | post-tool | pre-compact | session-start
-Manual:                         cr.py status [DIR] | doctor [DIR] [--exit-zero]
+Status line (optional):         cr.py statusline [-- COMMAND]
+Manual:                         cr.py status [DIR] | doctor [DIR] [--exit-zero] [--setup-statusline]
                                 cr.py history [--restore N] [DIR]
 """
 
@@ -15,7 +16,7 @@ from pathlib import Path
 # Import the package from the plugin root, not modules from this folder.
 sys.path[0] = str(Path(__file__).resolve().parent.parent)
 
-from contextrail import __version__, config, doctor, handlers, history, status  # noqa: E402
+from contextrail import __version__, config, doctor, handlers, history, status, statusline  # noqa: E402
 
 ERROR_LOG_LIMIT = 256 * 1024
 
@@ -34,6 +35,23 @@ def log_error() -> None:
         pass
 
 
+def run_statusline(args):
+    """The status line must keep working: errors are logged, and the wrapped command still runs."""
+    try:
+        raw = sys.stdin.buffer.read()
+    except (OSError, ValueError):
+        raw = b""
+    try:
+        statusline.record(statusline.parse(raw))
+    except Exception:
+        log_error()
+    try:
+        return statusline.show(args, raw)
+    except Exception:
+        log_error()
+        return 0
+
+
 def main(argv):
     if len(argv) < 2 or argv[1] in ("-h", "--help"):
         print(__doc__.strip())
@@ -47,12 +65,16 @@ def main(argv):
         return doctor.main(argv[2:])
     if argv[1] == "history":
         return history.main(argv[2:])
+    if argv[1] == "statusline":
+        return run_statusline(argv[2:])
     if argv[1] not in handlers.HOOKS:
         print(f"cr.py: unknown command {argv[1]!r}", file=sys.stderr)
         return 2
     event, handler = handlers.HOOKS[argv[1]]
     try:
         handlers.heartbeat(event)
+        if event == "SessionStart":
+            statusline.note_plugin_root()  # here, not in the handler: the doctor runs that one
         payload = json.loads(sys.stdin.read() or "{}")
         output = handler(payload) if isinstance(payload, dict) else None
     except Exception:

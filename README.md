@@ -52,7 +52,7 @@ Commands:
 | --- | --- |
 | `/contextrail:handoff` | Write a handoff now, at any context size. Useful before a break. |
 | `/contextrail:status` | Show context usage, trigger points, the saved handoff, and what changed since it was saved. |
-| `/contextrail:doctor` | Check the setup: Python, the hooks, storage and settings, when each hook last ran, whether usage can be read, and whether the saved handoff would load. |
+| `/contextrail:doctor` | Check the setup: Python, the hooks, storage and settings, when each hook last ran, whether usage can be read, and whether the saved handoff would load. `--setup-statusline` sets up the optional status-line wrapper. |
 | `/contextrail:history` | List the saved handoffs, newest first, with each one's first next step. `/contextrail:history --restore N` makes an archived one current again. |
 
 ## Hands-free continue (optional)
@@ -94,7 +94,17 @@ Why these numbers:
 - **Absolute tokens matter more than percentages.** Quality declines gradually with length, whatever the window size. On a 1M-token window, 50% would mean 500k tokens, far past the point where long sessions get unreliable. That is why the token cap usually decides.
 - **These are starting points, not laws.** Raise them if your sessions hold up longer.
 
-Context usage is read from the session transcript, the same way Claude Code computes it. Hook payloads do not include the window size. ContextRail assumes 200k unless the model name says `[1m]` or usage has already passed 200k. If you raise the caps on a 1M-window model, also set `window_tokens`.
+Context usage is read from the session transcript, the same way Claude Code computes it. Hook payloads do not include the window size. Without the status-line wrapper below, ContextRail assumes 200k unless the model name says `[1m]` or usage has already passed 200k. Several current models have a 1M window without saying so in their name, and then the percentages ContextRail shows are too high. The token caps still apply, so the default triggers are unchanged. But if you raise the caps on such a model, set up the wrapper or set `window_tokens`.
+
+### Exact window size (optional)
+
+Claude Code tells the status line the window size, but not the hooks. ContextRail can sit in front of your status line, note the size for its hooks, and pass your status line through unchanged:
+
+```
+/contextrail:doctor --setup-statusline
+```
+
+This writes a small launcher to `~/.contextrail/bin/statusline` and prints the `"statusLine"` entry to put in `~/.claude/settings.json`, with your current status line already filled in. ContextRail never edits that file; the agent can add the entry for you if you say yes. If you have no status line, ContextRail shows its own: `ctx 52% · 104k/200k · handoff at 100k`. The launcher finds the plugin after updates, and if ContextRail is removed it runs your status line on its own.
 
 ## Configuration
 
@@ -139,7 +149,7 @@ All data stays on your machine, under `~/.contextrail/` (or `CONTEXTRAIL_HOME`).
   config.json         optional per-project settings
 ```
 
-`~/.contextrail/` itself also holds `error.log`, for errors in the hooks, and `heartbeat.json`, which records when each hook last ran.
+`~/.contextrail/` itself also holds `error.log`, for errors in the hooks, `heartbeat.json`, which records when each hook last ran, and `plugin-root`, where the plugin is installed. With the status-line wrapper, it also holds `bin/statusline` and `sessions/`, the window size of each session (kept for 7 days).
 
 A project is the git repository root, or the folder itself if it isn't a repository. Sessions started in subfolders share the project's handoff.
 
@@ -184,8 +194,8 @@ Everything is standard-library Python 3.9+, with no dependencies. To try changes
 .claude-plugin/        plugin and marketplace manifests
 hooks/hooks.json       Stop, PostToolUse, PreCompact and SessionStart hooks
 commands/              /contextrail:handoff, :status, :doctor and :history
-contextrail/cr.py      entry point for hooks and the status, doctor and history commands
-contextrail/*.py       usage, facts, handoff, storage, config, prompts, status, doctor and history
+contextrail/cr.py      entry point for hooks, the status line and the status, doctor and history commands
+contextrail/*.py       usage, facts, handoff, storage, config, prompts, status, doctor, history and statusline
 mods/                  contextrail-continue, the optional mod that clears and continues
 tests/                 unittest suite with synthetic transcripts
 ```

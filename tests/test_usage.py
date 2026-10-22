@@ -73,6 +73,8 @@ class LastUsageTest(unittest.TestCase):
 
     def test_window_resolution(self):
         self.assertEqual(usage.resolve_window("claude-opus-5-5", 10, 500_000), (500_000, "config"))
+        self.assertEqual(usage.resolve_window("claude-opus-5-5", 10, 500_000, 200_000), (500_000, "config"))
+        self.assertEqual(usage.resolve_window("claude-opus-5-5[1m]", 10, None, 200_000), (200_000, "statusline"))
         self.assertEqual(usage.resolve_window("claude-opus-5-5[1m]", 10, None), (1_000_000, "model"))
         self.assertEqual(usage.resolve_window("claude-opus-5-5", 250_000, None), (1_000_000, "observed"))
         self.assertEqual(usage.resolve_window("claude-opus-5-5", 10, None), (200_000, "assumed"))

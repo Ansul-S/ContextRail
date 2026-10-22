@@ -46,6 +46,11 @@ def home() -> Path:
     return Path(override).expanduser() if override else Path.home() / ".contextrail"
 
 
+def claude_dir() -> Path:
+    """Claude Code's own folder, for its settings and transcripts."""
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+
+
 def tilde(path: Path) -> str:
     """path with the home folder shown as ~."""
     home_dir = str(Path.home())

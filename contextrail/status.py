@@ -25,6 +25,7 @@ def main(args: List[str]) -> int:
     limits = config.thresholds(cfg, usage.window if usage else cfg["window_tokens"] or DEFAULT_WINDOW)
     if usage:
         print(f"Context:   {usage.describe()}, latest session")
+        print(f"Window:    {usage.window:,} tokens, from {doctor.WINDOW_SOURCES[usage.window_source]}")
     else:
         print("Context:   no session transcript found for this folder")
     print(
