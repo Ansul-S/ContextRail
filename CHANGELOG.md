@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Status line:** ContextRail's own status line is now a rail that shows how close the session is to its next handoff: `━━━━━━━━━●┄┄┄┄┄┄┄┄◆┄┄┄┄┄  52k · handoff at 100k · 48k to go · 5% of 1M window`, followed by the model and the project. The colour goes from green to amber near the handoff and to red past the wrap-up point. The text says what ContextRail does next: the handoff point, a request that is due or made, waiting for background tasks, a saved handoff and how long ago, or a handoff that was never written. On narrow terminals the least useful parts are left out, and `NO_COLOR` turns the colours off. It replaces `ctx 52% · 104k/200k · handoff at 100k`. A status line of your own that runs through the launcher still passes through unchanged.
+
 ## 0.2.0 (2026-10-23)
 
 Better handoffs, facts you can trust, and fewer ways to lose work.

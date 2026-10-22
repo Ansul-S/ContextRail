@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -42,6 +43,7 @@ class StatusLineTest(TempHome):
         super().setUp()
         self.inner = self.tmp / "inner.py"
         self.inner.write_text(INNER)
+        os.environ.update(NO_COLOR="1", COLUMNS="120")  # TempHome restores the environment
 
     def status_input(self, **extra):
         return json.dumps(sample(str(self.repo), **extra)).encode()
@@ -58,7 +60,10 @@ class StatusLineTest(TempHome):
     def test_records_the_window_and_prints_its_own_line(self):
         result = self.run_cr(stdin=self.status_input())
         self.assertEqual((result.returncode, result.stderr), (0, b""))
-        self.assertEqual(result.stdout.decode(), "ctx 5% · 51k/1M · handoff at 100k\n")
+        self.assertEqual(
+            result.stdout.decode(),
+            "━━━━━━━━━●┄┄┄┄┄┄┄┄◆┄┄┄┄┄  51k · handoff at 100k · 49k to go · 5% of 1M window · Haiku 5.5 · repo\n",
+        )
         report = self.report()
         self.assertEqual((report["window"], report["used_pct"]), (1_000_000, 5))
         self.assertLess(abs(time.time() - report["ts"]), 30)
@@ -109,17 +114,95 @@ class StatusLineTest(TempHome):
         statusline.record(sample(str(self.repo), window=200_000))
         self.assertEqual(self.report()["window"], 200_000)
 
-    def test_own_line_follows_the_session_state(self):
+    def set_session(self, **fields):
         project = store.Project(self.repo)
         state = store.load_state(project)
-        store.session(state, SESSION)["saved_tokens"] = 102_000
+        store.session(state, SESSION).update(fields)
         store.save_state(project, state)
-        self.assertEqual(statusline.line(sample(str(self.repo))), "ctx 5% · 51k/1M · handoff at 142k")
+        return project
+
+    def line_at(self, tokens, **extra):
+        payload = sample(str(self.repo), **extra)
+        payload["context_window"].update(current_usage={"input_tokens": tokens}, used_percentage=None)
+        return statusline.line(payload)
+
+    def test_own_line_follows_the_session_state(self):
+        self.assertEqual(self.line_at(52_000), statusline.EXAMPLE + " · Haiku 5.5 · repo")
+        self.set_session(attempts=1)
+        self.assertIn("  101k · ◆ handoff requested · 10% of 1M window", self.line_at(101_000))
+        self.set_session(attempts=0, deferred_notice=True)
+        self.assertIn("  103k · ◷ waiting for background tasks ·", self.line_at(103_000))
+        self.assertIn("  90k · handoff at 100k · 10k to go ·", self.line_at(90_000))
+        self.set_session(deferred_notice=False)
+        self.assertIn("  104k · ◆ handoff due ·", self.line_at(104_000))
+        project = self.set_session(saved_tokens=102_000)
+        self.assertIn("  112k · ✓ saved · next at 142k ·", self.line_at(112_000))
+        project.handoff.parent.mkdir(parents=True, exist_ok=True)
+        project.handoff.write_text("# Handoff\n")
+        stamp = time.time() - 190
+        os.utime(project.handoff, (stamp, stamp))
+        self.assertEqual(
+            self.line_at(112_000),
+            "━━━━━━━━━━━━━━◇●┄┄┄◆┄┄┄┄  112k · ✓ saved 3m ago · next at 142k · 11% of 1M window · Haiku 5.5 · repo",
+        )
+        self.set_session(attempts=3, gave_up=True)
+        self.assertIn("  150k · ✗ no handoff written · /contextrail:handoff ·", self.line_at(150_000))
         with mock.patch.dict(os.environ, {"CONTEXTRAIL_DISABLE": "1"}):
-            self.assertEqual(statusline.line(sample(str(self.repo))), "ctx 5% · 51k/1M · ContextRail off")
+            self.assertIn("  52k · ContextRail off ·", self.line_at(52_000))
         fresh = sample(str(self.repo), session_id="new")
         fresh["context_window"].update(current_usage=None, used_percentage=None)
-        self.assertEqual(statusline.line(fresh), "ctx 0% · 0k/1M · handoff at 100k")
+        self.assertTrue(statusline.line(fresh).startswith("●┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄◆┄┄┄┄┄  0k · handoff at 100k · 100k to go"))
+        homeless = sample("")
+        del homeless["workspace"]
+        self.assertIn("  51k · handoff at 100k ·", statusline.line(homeless))
+
+    def test_rail_ends_at_the_wrap_up_point_or_past_the_next_request(self):
+        self.assertTrue(self.line_at(130_000).startswith("━━━━━━━━━━━━━━━━━━◆━━━━●  130k"))
+        self.assertTrue(self.line_at(400_000).startswith("━━━━━━━━━━━━━━━━━━◆━━━━●  400k"))
+        self.set_session(saved_tokens=140_000)
+        self.assertTrue(self.line_at(140_000).startswith("━━━━━━━━━━━━━━━━●┄┄┄◆┄┄┄  140k · ✓ saved · next at 180k"))
+        self.assertTrue(self.line_at(160_000).startswith("━━━━━━━━━━━━━━━━◇━●┄◆┄┄┄  160k · ✓ saved · next at 180k"))
+
+    def test_parts_drop_out_on_narrow_terminals(self):
+        expected = {
+            "120": "52k · handoff at 100k · 48k to go · 5% of 1M window · Haiku 5.5 · repo",
+            "80": "52k · handoff at 100k · 5% of 1M window",
+            "60": "52k · handoff at 100k",
+        }
+        for columns, tail in expected.items():
+            with mock.patch.dict(os.environ, {"COLUMNS": columns}):
+                self.assertEqual(self.line_at(52_000), statusline.EXAMPLE[:24] + "  " + tail, columns)
+        for columns in ("40", "", "wide"):
+            with mock.patch.dict(os.environ, {"COLUMNS": columns}):
+                text = self.line_at(52_000)
+            if columns == "40":
+                self.assertEqual(text, "━━━━━━●┄┄┄┄┄◆┄┄┄  52k · handoff at 100k")
+            else:
+                self.assertTrue(text.endswith("· Haiku 5.5 · repo"), columns)
+
+    def test_colours_follow_the_terminal(self):
+        del os.environ["NO_COLOR"]
+        plain = re.compile(r"\x1b\[[0-9;]*m")
+        with mock.patch.dict(os.environ, {"COLORTERM": "truecolor"}):
+            text = self.line_at(52_000)
+        self.assertTrue(text.startswith("\x1b[38;2;63;185;128m━━━━━━━━━\x1b[0m\x1b[1;38;2;63;185;128m●\x1b[0m"))
+        self.assertEqual(plain.sub("", text), statusline.EXAMPLE + " · Haiku 5.5 · repo")
+        with mock.patch.dict(os.environ, {"COLORTERM": ""}):
+            text = self.line_at(120_000)
+        self.assertNotIn("38;2;", text)
+        self.assertIn("\x1b[38;5;", text)
+        self.assertTrue(plain.sub("", text).startswith("━━━━━━━━━━━━━━━━━━◆━━━●┄  120k · ◆ handoff due"))
+        for env in ({"NO_COLOR": "1"}, {"TERM": "dumb", "COLORTERM": "truecolor"}):
+            with mock.patch.dict(os.environ, env):
+                self.assertNotIn("\x1b", self.line_at(52_000))
+
+    def test_colour_runs_from_green_to_amber_to_red(self):
+        view = statusline._view(sample(str(self.repo)), 1_000_000)
+        zone = [statusline._zone(tokens, view) for tokens in (0, 60_000, 80_000, 100_000, 115_000, 130_000, 500_000)]
+        self.assertEqual(zone[:2], [statusline.GREEN] * 2)
+        self.assertEqual((zone[3], zone[5], zone[6]), (statusline.AMBER, statusline.RED, statusline.RED))
+        self.assertTrue(statusline.GREEN[0] < zone[2][0] < statusline.AMBER[0])
+        self.assertTrue(statusline.AMBER[1] > zone[4][1] > statusline.RED[1])
 
 
 class WindowSourceTest(TempHome):

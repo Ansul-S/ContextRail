@@ -105,7 +105,20 @@ Claude Code tells the status line the window size, but not the hooks. ContextRai
 /contextrail:doctor --setup-statusline
 ```
 
-This writes a small launcher to `~/.contextrail/bin/statusline` and prints the `"statusLine"` entry to put in `~/.claude/settings.json`, with your current status line already filled in. ContextRail never edits that file; the agent can add the entry for you if you say yes. If you have no status line, ContextRail shows its own: `ctx 52% · 104k/200k · handoff at 100k`. The launcher finds the plugin after updates, and if ContextRail is removed it runs your status line on its own.
+This writes a small launcher to `~/.contextrail/bin/statusline` and prints the `"statusLine"` entry to put in `~/.claude/settings.json`, with your current status line already filled in. ContextRail never edits that file; the agent can add the entry for you if you say yes. The launcher finds the plugin after updates, and if ContextRail is removed it runs your status line on its own.
+
+If you have no status line, ContextRail shows its own: a rail that fills up as the session's context grows.
+
+```
+━━━━━━━━━●┄┄┄┄┄┄┄┄◆┄┄┄┄┄  52k · handoff at 100k · 48k to go · 5% of 1M window · Opus 5.5 · my-project
+```
+
+- `●` is where the session is now and `◆` is the next handoff request. The rail ends at the wrap-up point, 130k by default. After a handoff is saved, `◇` marks it and the rail reaches past the next request.
+- The colour goes from green to amber as the handoff gets close, and to red past the wrap-up point.
+- The text after the rail says what ContextRail does next: `handoff at 100k`, `◆ handoff due`, `◆ handoff requested`, `◷ waiting for background tasks`, `✓ saved 3m ago · next at 142k`, or `✗ no handoff written`.
+- On a narrow terminal the project, the model and the window share are left out first. `NO_COLOR` turns the colours off.
+
+To use ContextRail's line in place of your own, leave out the ` -- '…'` part of the launcher command.
 
 ## Configuration
 

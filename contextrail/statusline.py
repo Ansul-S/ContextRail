@@ -15,6 +15,7 @@ import shlex
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -26,7 +27,7 @@ PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 WRITE_EVERY = 5
 KEEP = 7 * 24 * 3600
 INNER_TIMEOUT = 5
-EXAMPLE = "ctx 52% · 104k/200k · handoff at 100k"
+EXAMPLE = "━━━━━━━━━●┄┄┄┄┄┄┄┄◆┄┄┄┄┄  52k · handoff at 100k · 48k to go · 5% of 1M window"
 LAUNCHER = """#!/bin/sh
 # ContextRail status-line launcher, written by `cr.py doctor --setup-statusline`.
 # Updates move the plugin to a new folder, so look it up on every run.
@@ -120,25 +121,159 @@ def _short(tokens: int) -> str:
     return f"{tokens / LARGE_WINDOW:g}M" if tokens >= LARGE_WINDOW else f"{round(tokens / 1000)}k"
 
 
-def _due(payload: Dict[str, Any], window: int) -> str:
-    """When this session's next handoff request is due, as the hooks work it out."""
+def _ago(seconds: float) -> str:
+    if seconds < 60:
+        return "just now"
+    for size, unit in ((86_400, "d"), (3600, "h"), (60, "m")):
+        if seconds >= size:
+            return f"{int(seconds // size)}{unit} ago"
+    return "just now"
+
+
+@dataclass
+class View:
+    """What the hooks will do next in this session, as the status line shows it."""
+
+    enabled: bool
+    soft: int
+    hard: int
+    due: int  # the next handoff request
+    saved: Optional[int]  # tokens at this session's last saved handoff
+    saved_ago: Optional[float]
+    asked: bool
+    gave_up: bool
+    waiting: bool
+    project: str
+
+    @property
+    def end(self) -> int:
+        """Where the rail ends: the wrap-up point, or past the next request after a save."""
+        return max(self.hard, self.due + max(self.hard - self.soft, self.due // 8))
+
+
+def _view(payload: Dict[str, Any], window: int) -> View:
     workspace = payload.get("workspace") if isinstance(payload.get("workspace"), dict) else {}
     cwd = payload.get("cwd") or workspace.get("current_dir")
-    if not isinstance(cwd, str) or not cwd:
+    project = store.Project(facts.project_root(cwd)) if isinstance(cwd, str) and cwd else None
+    cfg = config.load(project.dir if project else None)
+    limits = config.thresholds(cfg, cfg["window_tokens"] or window)
+    entry = store.load_state(project)["sessions"].get(str(payload.get("session_id") or "")) if project else None
+    entry = entry if isinstance(entry, dict) else {}
+    saved = entry.get("saved_tokens") if isinstance(entry.get("saved_tokens"), int) else None
+    ago = None
+    if saved is not None and project:
+        try:
+            ago = max(0.0, time.time() - project.handoff.stat().st_mtime)
+        except OSError:
+            pass
+    attempts = entry.get("attempts") if isinstance(entry.get("attempts"), int) else 0
+    return View(
+        enabled=bool(cfg["enabled"]), soft=limits.soft, hard=limits.hard,
+        due=saved + cfg["refresh_tokens"] if saved is not None else limits.soft,
+        saved=saved, saved_ago=ago, asked=attempts > 0 and not entry.get("gave_up"),
+        gave_up=bool(entry.get("gave_up")), waiting=bool(entry.get("deferred_notice")) and attempts == 0,
+        project=project.root.name if project else "",
+    )
+
+
+Colour = Tuple[int, int, int]
+GREEN: Colour = (63, 185, 128)
+AMBER: Colour = (230, 167, 46)
+RED: Colour = (229, 83, 75)
+TRACK: Colour = (88, 94, 104)
+DIM: Colour = (138, 145, 155)
+TRACK_CELLS, NARROW_TRACK_CELLS = 24, 16
+
+
+def _colour_mode() -> str:
+    if os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
         return ""
-    project = store.Project(facts.project_root(cwd))
-    cfg = config.load(project.dir)
-    if not cfg["enabled"]:
-        return "ContextRail off"
-    entry = store.load_state(project)["sessions"].get(str(payload.get("session_id") or ""))
-    saved = entry.get("saved_tokens") if isinstance(entry, dict) else None
-    if isinstance(saved, int):
-        return f"handoff at {_short(saved + cfg['refresh_tokens'])}"
-    return f"handoff at {_short(config.thresholds(cfg, cfg['window_tokens'] or window).soft)}"
+    return "24" if os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit") else "256"
+
+
+def _code(colour: Colour, mode: str, bold: bool = False) -> str:
+    """The escape sequence that starts text in this colour; 256-colour terminals get the nearest one."""
+    if not mode:
+        return ""
+    r, g, b = colour
+    code = f"38;2;{r};{g};{b}" if mode == "24" else f"38;5;{16 + 36 * round(r / 51) + 6 * round(g / 51) + round(b / 51)}"
+    return f"\x1b[{'1;' if bold else ''}{code}m"
+
+
+def _paint(text: str, colour: Colour, mode: str, bold: bool = False) -> str:
+    start = _code(colour, mode, bold)
+    return f"{start}{text}\x1b[0m" if start else text
+
+
+def _zone(tokens: float, view: View) -> Colour:
+    """Green while there is room, amber towards the handoff, red past the wrap-up point."""
+    soft, hard = max(view.soft, 1), max(view.hard, 1)
+    calm = 0.6 * soft
+    if tokens <= calm:
+        return GREEN
+    if tokens <= soft:
+        return _mix(GREEN, AMBER, (tokens - calm) / (soft - calm))
+    if tokens <= hard and hard > soft:
+        return _mix(AMBER, RED, (tokens - soft) / (hard - soft))
+    return RED
+
+
+def _mix(a: Colour, b: Colour, share: float) -> Colour:
+    return tuple(round(x + (y - x) * share) for x, y in zip(a, b))  # type: ignore[return-value]
+
+
+def _rail(tokens: int, view: View, cells: int, mode: str) -> str:
+    """━━━━━━━━●┄┄┄┄◆┄┄┄: filled to where the session is, ◆ at the next request, ◇ at the last save."""
+    per = view.end / cells
+
+    def at(value: int) -> int:
+        return min(cells - 1, int(value / per))
+
+    head = at(tokens)
+    stations = {at(view.due): ("◆", AMBER)}
+    if view.saved is not None:
+        stations.setdefault(at(view.saved), ("◇", GREEN))
+    runs: List[Tuple[str, str]] = []  # (text, escape sequence)
+    for cell in range(cells):
+        if cell == head:
+            char, colour, bold = "●", _zone(tokens, view), True
+        elif cell in stations:
+            (char, colour), bold = stations[cell], False
+        elif cell < head:
+            char, colour, bold = "━", _zone((cell + 0.5) * per, view), False
+        else:
+            char, colour, bold = "┄", TRACK, False
+        start = _code(colour if view.enabled or char == "┄" else DIM, mode, bold)
+        if runs and runs[-1][1] == start:
+            runs[-1] = (runs[-1][0] + char, start)
+        else:
+            runs.append((char, start))
+    return "".join(f"{start}{text}\x1b[0m" if start else text for text, start in runs)
+
+
+def _state(tokens: int, view: View, mode: str) -> List[Tuple[int, str, str]]:
+    """(priority, plain text, painted text) for what happens next; lower priority is dropped first."""
+    def part(priority: int, text: str, colour: Optional[Colour] = None, bold: bool = False) -> Tuple[int, str, str]:
+        return priority, text, _paint(text, colour, mode, bold) if colour else text
+
+    if not view.enabled:
+        return [part(9, "ContextRail off", DIM)]
+    if view.gave_up:
+        return [part(9, "✗ no handoff written", RED, True), part(5, "/contextrail:handoff", DIM)]
+    if view.asked:
+        return [part(9, "◆ handoff requested", AMBER, True)]
+    if tokens >= view.due:
+        if view.waiting:
+            return [part(9, "◷ waiting for background tasks", AMBER, True)]
+        return [part(9, "◆ handoff due", AMBER, True)]
+    if view.saved is not None:
+        saved = "✓ saved" + (f" {_ago(view.saved_ago)}" if view.saved_ago is not None else "")
+        return [part(9, saved, GREEN, True), part(6, f"next at {_short(view.due)}")]
+    return [part(9, f"handoff at {_short(view.due)}"), part(3, f"{_short(view.due - tokens)} to go", DIM)]
 
 
 def line(payload: Dict[str, Any]) -> str:
-    """ContextRail's own status line, for users who have none: ctx 52% · 104k/200k · handoff at 100k."""
+    """ContextRail's own status line, as in EXAMPLE: the rail, then what the hooks do next."""
     window, info = _context(payload)
     if window is None:
         return ""
@@ -149,8 +284,32 @@ def line(payload: Dict[str, Any]) -> str:
     pct = info.get("used_percentage")
     if not isinstance(pct, (int, float)):
         pct = 100 * tokens / window
-    due = _due(payload, window)
-    return f"ctx {pct:.0f}% · {_short(tokens)}/{_short(window)}" + (f" · {due}" if due else "")
+    view = _view(payload, window)
+    mode = _colour_mode()
+    model = payload.get("model") if isinstance(payload.get("model"), dict) else {}
+    name = model.get("display_name") if isinstance(model.get("display_name"), str) else ""
+    parts = [(10, _short(tokens), _paint(_short(tokens), _zone(tokens, view) if view.enabled else DIM, mode, True))]
+    parts += _state(tokens, view, mode)
+    window_text = f"{pct:.0f}% of {_short(window)} window"
+    parts.append((4, window_text, _paint(window_text, DIM, mode)))
+    parts += [(p, text, _paint(text, DIM, mode)) for p, text in ((2, name), (1, view.project)) if text]
+    try:
+        room = int(os.environ.get("COLUMNS") or 0) - 4  # Claude Code indents the status line
+    except ValueError:
+        room = 0
+    room = room if room > 0 else 116
+    cells = TRACK_CELLS
+    while True:
+        plain = cells + 2 + sum(len(text) for _, text, _ in parts) + 3 * (len(parts) - 1)
+        if plain <= room or (cells == NARROW_TRACK_CELLS and len(parts) <= 2):
+            break
+        lowest = min(range(len(parts)), key=lambda i: parts[i][0])
+        if parts[lowest][0] < 5 or cells == NARROW_TRACK_CELLS:
+            del parts[lowest]
+        else:
+            cells = NARROW_TRACK_CELLS
+    sep = _paint(" · ", DIM, mode)
+    return _rail(tokens, view, cells, mode) + "  " + sep.join(painted for _, _, painted in parts)
 
 
 def show(args: List[str], raw: bytes) -> int:
