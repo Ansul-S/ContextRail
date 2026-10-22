@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Handoff template v2:** a required `## User's rules` section quotes the user's constraints, approvals and preferences in their own words. New `## Known facts` (locations, counts, names, IDs, root causes) and `## How to run` (commands, working directory, environment, guards that block actions) sections. Each open question now comes with its background, the options and a recommendation, and the first next step continues the user's latest request. New rules: only messages the user typed count as requests or approval, numbers and IDs are copied exactly, and code is named rather than cited by line number. The loaded handoff tells the next session to keep to the user's rules. The default `max_chars` is now 12,000.
 - **Accurate "Recent checks":** each shell command is reduced to the test, lint or build command inside it, without `cd`, heredoc bodies or long prefixes. When a pipe or a later command hides the exit status, the result comes from the summary line the tool prints. If there is none, the check is shown as "ran" instead of "passed". Commands that were denied, or sent to the background, show "result unknown".
 - **Edited files:** files outside the project are counted instead of listed.
 - **`/contextrail:doctor`:** checks Python and how long a hook takes to start, the plugin's hooks, storage, settings (including keys and values that are ignored), when each hook last ran, whether usage can be read from the transcripts, whether the saved handoff would load, and recent errors. `cr.py doctor` exits 1 if a check fails.

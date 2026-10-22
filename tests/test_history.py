@@ -7,7 +7,7 @@ from unittest import mock
 from contextrail import facts, handlers, history, store
 from tests.helpers import VALID_BODY, TempHome, git
 
-FIRST_STEP = "1. Read `RATE_LIMIT_PER_MIN` from settings in `api/app.py`."
+FIRST_STEP = VALID_BODY.split("## Next steps\n")[1].splitlines()[0]
 
 
 class HistoryTest(TempHome):

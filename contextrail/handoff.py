@@ -14,8 +14,14 @@ HEADING_RE = re.compile(r"^##[ \t]+(.+?)[ \t#]*$", re.M)
 NARRATIVE_MARK = "<!-- contextrail:narrative -->"
 CARRIED_OVER = "_Carried over from the previous handoff"
 
-REQUIRED = ["Goal", "Done", "In progress", "Next steps", "Resume prompt"]
+REQUIRED = ["Goal", "User's rules", "Done", "In progress", "Next steps", "Resume prompt"]
+# Keys are headings as _key() normalizes them, so "User's rules" is "users rules".
 ALIASES = {
+    "user rules": "users rules",
+    "rules": "users rules",
+    "constraints": "users rules",
+    "facts": "known facts",
+    "run": "how to run",
     "next": "next steps",
     "next step": "next steps",
     "resume": "resume prompt",
@@ -35,7 +41,7 @@ def extract(text: Optional[str]) -> Optional[str]:
 
 
 def _key(heading: str) -> str:
-    key = " ".join(re.sub(r"[^a-z]+", " ", heading.lower()).split())
+    key = " ".join(re.sub(r"[^a-z]+", " ", re.sub(r"['’]", "", heading.lower())).split())
     return ALIASES.get(key, key)
 
 
@@ -47,7 +53,7 @@ def sections(body: str) -> Dict[str, str]:
 def problems(body: str, max_chars: int) -> List[str]:
     found = sections(body)
     issues = []
-    missing = [name for name in REQUIRED if not found.get(name.lower())]
+    missing = [name for name in REQUIRED if not found.get(_key(name))]
     if missing:
         issues.append("missing or empty: " + ", ".join(f"'## {name}'" for name in missing))
     if len(body) > max_chars:

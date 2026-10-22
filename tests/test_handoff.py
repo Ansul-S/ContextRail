@@ -25,8 +25,24 @@ class SectionsTest(unittest.TestCase):
         self.assertEqual(found["in progress"], "half\n### Sub\nkept inside")
         self.assertEqual(handoff.resume_prompt(body), "Go")
 
+    def test_apostrophes_and_aliases(self):
+        body = "## User’s rules\nask first\n## Constraints\nno deps\n## Facts\n3 routes\n## Run\n`make test`"
+        self.assertEqual(handoff._key("User's rules"), "users rules")
+        found = handoff.sections(body)
+        self.assertEqual(found["users rules"], "no deps")  # the later heading wins
+        self.assertEqual(found["known facts"], "3 routes")
+        self.assertEqual(found["how to run"], "`make test`")
+
     def test_valid_body_has_no_problems(self):
-        self.assertEqual(handoff.problems(VALID_BODY, 8_000), [])
+        self.assertEqual(handoff.problems(VALID_BODY, 12_000), [])
+        for heading in ("## Users rules", "## User rules", "## Constraints"):
+            self.assertEqual(handoff.problems(VALID_BODY.replace("## User's rules", heading), 12_000), [])
+
+    def test_user_rules_are_required(self):
+        without = VALID_BODY.replace("## User's rules", "## Notes")
+        self.assertEqual(handoff.problems(without, 12_000), ["missing or empty: '## User's rules'"])
+        empty = VALID_BODY.split("## User's rules")[0] + "## User's rules\n\n## Done" + VALID_BODY.split("## Done")[1]
+        self.assertEqual(handoff.problems(empty, 12_000), ["missing or empty: '## User's rules'"])
 
     def test_reports_missing_long_and_resume(self):
         body = "## Goal\nx\n## Done\n\n## Resume prompt\n" + "r" * 900
@@ -78,7 +94,9 @@ class FallbackTest(unittest.TestCase):
 
     def test_stub_when_nothing_to_carry(self):
         body = handoff.fallback_body("", None)
-        self.assertEqual(handoff.problems(body, 8_000), ["missing or empty: '## Done', '## In progress'"])
+        self.assertEqual(
+            handoff.problems(body, 12_000), ["missing or empty: '## User's rules', '## Done', '## In progress'"]
+        )
         self.assertTrue(handoff.resume_prompt(body))
 
 

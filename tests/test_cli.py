@@ -4,7 +4,7 @@ import subprocess
 import sys
 import time
 
-from contextrail import handlers, prompts
+from contextrail import config, handlers, handoff, prompts
 from tests.helpers import CR, ROOT, VALID_BODY, TempHome
 
 
@@ -118,7 +118,15 @@ class PluginFilesTest(TempHome):
     def test_handoff_command_matches_the_hook_prompt(self):
         command = (ROOT / "commands/handoff.md").read_text()
         self.assertIn(prompts.TEMPLATE, command)
-        self.assertIn(prompts.RULES.format(max_chars=8_000), command)
+        self.assertIn(prompts.RULES.format(max_chars=config.DEFAULTS["max_chars"]), command)
+
+    def test_example_and_test_body_follow_the_template(self):
+        headings = handoff.HEADING_RE.findall(prompts.TEMPLATE)
+        example = handoff.narrative_of((ROOT / "examples/HANDOFF.example.md").read_text())
+        for body in (VALID_BODY, example):
+            self.assertEqual(handoff.HEADING_RE.findall(body), headings)
+        self.assertEqual(example, VALID_BODY)
+        self.assertEqual(handoff.problems(VALID_BODY, config.DEFAULTS["max_chars"]), [])
 
     def test_entry_point_is_executable(self):
         self.assertTrue(os.access(CR, os.X_OK))

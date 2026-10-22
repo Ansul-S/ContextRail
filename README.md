@@ -7,7 +7,7 @@ Long coding sessions get worse well before the context window is full. The agent
 ContextRail is a Claude Code plugin that does it for you:
 
 1. **It notices** when the session reaches the point where quality starts to drop (100k tokens by default).
-2. **It asks the agent for a handoff** while the agent still has the full picture: goal, done, in progress, next steps, decisions, dead ends, and a short resume prompt.
+2. **It asks the agent for a handoff** while the agent still has the full picture: the goal, your rules in your own words, what is done and in progress, next steps, decisions, dead ends, facts already found, how to run things, open questions with options, and a short resume prompt.
 3. **It saves the handoff** outside your repository, with facts it records itself: branch, commit, uncommitted files, files edited, and test runs.
 4. **It loads the handoff** into the next session. That happens on `/clear`, on a new session, or after compaction, together with a list of what changed in the repository since.
 
@@ -110,7 +110,7 @@ Settings are applied in this order, later ones winning:
   "hard_tokens": 130000,
   "window_tokens": null,
   "refresh_tokens": 40000,
-  "max_chars": 8000,
+  "max_chars": 12000,
   "max_attempts": 3,
   "inject_on": ["startup", "clear", "compact"],
   "max_age_days": 30,
@@ -120,7 +120,7 @@ Settings are applied in this order, later ones winning:
 }
 ```
 
-- `max_chars` caps the part the agent writes, which keeps the handoff to about 2-3k tokens when it is loaded.
+- `max_chars` caps the part the agent writes, which keeps the handoff to about 3k tokens when it is loaded.
 - `inject_on` sets which session starts load the handoff (`startup`, `clear`, `compact`, `resume`).
 - To turn ContextRail off everywhere, set `CONTEXTRAIL_DISABLE=1`. To turn it off for one project, put `{"enabled": false}` in that project's `config.json`.
 

@@ -213,6 +213,7 @@ class SessionStartTest(TempHome):
             context = out["hookSpecificOutput"]["additionalContext"]
             self.assertTrue(context.startswith("<contextrail-previous-handoff"))
             self.assertIn("## Next steps", context)
+            self.assertIn("Keep to the user's rules", context)
             self.assertIn("- None detected.", context)
             self.assertNotIn("<contextrail-handoff>", context)
             self.assertIn("loaded the handoff saved just now (no repo changes since)", out["systemMessage"])
