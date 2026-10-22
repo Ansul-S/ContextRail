@@ -1,6 +1,6 @@
 {
   "name": "contextrail-continue",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Optional companion to ContextRail: after it saves a handoff, clears the session and continues from the handoff by itself.",
   "author": {
     "name": "Ansul-S"

@@ -9,7 +9,7 @@ ContextRail is a Claude Code plugin that does it for you:
 1. **It notices** when the session reaches the point where quality starts to drop (100k tokens by default).
 2. **It asks the agent for a handoff** while the agent still has the full picture: the goal, your rules in your own words, what is done and in progress, next steps, decisions, dead ends, facts already found, how to run things, open questions with options, and a short resume prompt.
 3. **It saves the handoff** outside your repository, with facts it records itself: branch, commit, uncommitted files, files edited, and test runs.
-4. **It loads the handoff** into the next session. That happens on `/clear`, on a new session, or after compaction, together with a list of what changed in the repository since.
+4. **It loads the handoff** into the next session. That happens on `/clear`, on a new session, or after compaction, together with what changed in the repository since and which of the handoff's claims to re-check.
 
 You type `/clear` when it tells you to. Everything else is automatic.
 
@@ -149,7 +149,7 @@ All data stays on your machine, under `~/.contextrail/` (or `CONTEXTRAIL_HOME`).
   HANDOFF.md          current handoff (overwritten each time)
   RESUME_PROMPT.txt   the resume prompt
   history/            previous handoffs, each with its meta (never loaded automatically)
-  meta.json           git state at save time, used for drift checks
+  meta.json           git state and file fingerprints at save time, for the drift check
   state.json          per-session trigger state
   config.json         optional per-project settings
 ```
@@ -185,7 +185,7 @@ Run `/contextrail:doctor`. It lists each check as ok, warn or FAIL, with what to
 Each hook is one short Python process, usually under 0.1 s, even with transcripts of 60 MB or more. Version-manager shims such as pyenv can add about 0.15 s per call. `/contextrail:doctor` measures it.
 
 **Windows?**
-It should work if `python3` is on your `PATH`. File locking and the clipboard use fallbacks. It is not yet tested in CI.
+It should work if `python3` is on your `PATH`. File locking and the clipboard use fallbacks. It is not yet tested in CI. The optional status-line wrapper's launcher is a shell script, so it works on macOS and Linux only.
 
 **Will it overwrite my notes?**
 The previous `HANDOFF.md` moves to `history/` each time a new one is saved. The last 20 are kept. `/contextrail:history` lists them, and `--restore N` brings one back; the one it replaces moves to `history/` in turn.
