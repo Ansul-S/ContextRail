@@ -27,7 +27,7 @@ You need Claude Code 2.x, Python 3.9 or newer as `python3` on your `PATH`, and g
 In Claude Code:
 
 ```
-/plugin marketplace add Ansul-S/contextrail
+/plugin marketplace add Ansul-S/ContextRail
 /plugin install contextrail@contextrail
 ```
 

@@ -11,7 +11,7 @@
       "description": "Saves a handoff before long Claude Code sessions lose quality, and loads it into the next session.",
       "version": "0.1.0",
       "category": "productivity",
-      "homepage": "https://github.com/Ansul-S/contextrail"
+      "homepage": "https://github.com/Ansul-S/ContextRail"
     }
   ]
 }
