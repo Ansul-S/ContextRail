@@ -24,6 +24,8 @@ DEFAULTS: Dict[str, Any] = {
     "refresh_tokens": 40_000,
     # Upper limit for the part of the handoff the agent writes.
     "max_chars": 12_000,
+    # Also check the handoff against the session's facts (edited files, checks) before saving.
+    "content_checks": True,
     # How many times one session is asked before ContextRail gives up.
     "max_attempts": 3,
     # SessionStart sources that load the handoff into the new session.

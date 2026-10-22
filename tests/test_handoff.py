@@ -76,6 +76,72 @@ class MentionsTest(unittest.TestCase):
         self.assertTrue(excerpt.startswith("…") and excerpt.endswith("api/limits.py…"))
 
 
+class ContentChecksTest(unittest.TestCase):
+    # The facts of the example handoff: what was edited, what is uncommitted, what ran.
+    EDITED = ["api/limits.py", "tests/test_limits.py", "api/app.py"]
+    DIRTY = ["api/app.py", "tests/test_app.py"]
+    CHECKS = [("pytest -q tests/test_limits.py", "passed"), ("pytest -q", "failed")]
+
+    def issues(self, body=VALID_BODY, edited=EDITED, dirty=DIRTY, checks=CHECKS):
+        return handoff.content_problems(body, Activity(edited=list(edited), checks=list(checks)), list(dirty))
+
+    def test_the_example_matches_its_facts(self):
+        self.assertEqual(self.issues(), [])
+        self.assertEqual(handoff.problems(VALID_BODY, 12_000, Activity(edited=self.EDITED), self.DIRTY), [])
+
+    def test_uncommitted_edits_the_narrative_never_names(self):
+        edited = self.EDITED + ["lib/old.py", "api/settings.py", "docs/limits.md", "web/a.ts", "web/b.ts", "new/c.py",
+                                "new/d.py", "x.py"]
+        dirty = self.DIRTY + ["docs/limits.md", "web/a.ts", "web/b.ts", "new/", "x.py"]
+        (issue,) = self.issues(edited=edited, dirty=dirty)
+        # settings.py is named and lib/old.py committed; files under new/ count as uncommitted.
+        self.assertEqual(issue, (
+            "mention or explain these uncommitted files edited in this session: "
+            "`docs/limits.md`, `web/a.ts`, `web/b.ts`, `new/c.py`, `new/d.py` and 1 more"
+        ))
+        self.assertEqual(self.issues(body=VALID_BODY + "\n- Also touched `docs/limits.md`, `x.py` and web/.",
+                                     edited=edited, dirty=dirty[:-2] + ["x.py"]), [])
+
+    def test_names_without_the_extension_count_and_test_files_are_left_out(self):
+        edited = ["contextrail/handoff.py", "CHANGELOG.md", "contextrail/config.py", "tests/test_x.py", "web/a.spec.ts",
+                  "pkg/x_test.go", "contextrail/store.py"]
+        body = VALID_BODY + "\n- `handoff.render` and config.load changed; CHANGELOG updated."
+        (issue,) = self.issues(body=body, edited=edited, dirty=edited)
+        self.assertTrue(issue.endswith(": `contextrail/store.py`"), issue)
+
+    def test_done_without_evidence(self):
+        vague = VALID_BODY.replace("`pytest -q tests/test_limits.py` passed (12 tests)", "works now")
+        self.assertEqual(len(self.issues(body=vague)), 1)
+        self.assertIn("'## Done' gives no evidence", self.issues(body=vague)[0])
+        # One piece of evidence covers the section: handoffs often list the work, then the test run.
+        listed = vague.replace("works now.", "works now.\n- `slugify` added.\n- `pytest -q` ran: 14 passed.")
+        self.assertEqual(self.issues(body=listed, checks=[]), [])
+        nothing = VALID_BODY.replace("- `TokenBucket` in `api/limits.py`;", "- None yet;", 1)
+        self.assertEqual(self.issues(body=nothing.replace("passed (12 tests)", "")), [])
+
+    def test_vague_first_step(self):
+        first = VALID_BODY.split("## Next steps\n")[1].splitlines()[0]
+        for vague in ("1. Continue with the work.", "1. Finish the feature and test it"):
+            self.assertEqual(self.issues(body=VALID_BODY.replace(first, vague)),
+                             ["make step 1 of '## Next steps' concrete: name the file, function or command"])
+        for concrete in ("1. Wait for the user's instructions.", '1. "add the 429 test": write it', "1. Fix api/app.py",
+                         "1. Rename create_app()", "1. Close issue #151", "1. Start P0-3", "1. Read limits.py"):
+            self.assertEqual(self.issues(body=VALID_BODY.replace(first, concrete)), [], concrete)
+
+    def test_done_contradicts_a_failed_check(self):
+        quoted = VALID_BODY.replace("`pytest -q tests/test_limits.py` passed", "`pytest -q` passed")
+        generic = VALID_BODY.replace("`pytest -q tests/test_limits.py` passed (12 tests).", "all the tests pass.")
+        expected = ["the facts show `pytest -q` failed, but '## Done' says it passed: correct that, or run it again"]
+        self.assertEqual(self.issues(body=quoted), expected)
+        self.assertEqual(self.issues(body=generic), expected)
+        # A narrower run that passed, a failed lint run, or a failure a later test run passed after: no contradiction.
+        self.assertEqual(self.issues(), [])
+        self.assertEqual(self.issues(body=generic, checks=[("ruff check .", "failed")]), [])
+        fixed = [("pytest -q", "failed"), ("pytest -q tests/test_limits.py", "passed")]
+        self.assertEqual(self.issues(body=generic, checks=fixed), [])
+        self.assertEqual(self.issues(body=quoted, checks=fixed), expected)
+
+
 class RenderTest(unittest.TestCase):
     def test_facts_on_top_narrative_below(self):
         git = GitState(branch="main", head="abcdef1234567", subject="Add limiter", dirty=["api/app.py"], diff_hash="h")

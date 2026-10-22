@@ -12,7 +12,7 @@ FIRST_STEP = VALID_BODY.split("## Next steps\n")[1].splitlines()[0]
 
 class HistoryTest(TempHome):
     def save(self, step):
-        body = VALID_BODY.replace(FIRST_STEP, f"1. {step}")
+        body = VALID_BODY.replace(FIRST_STEP, f"1. Run `{step}`")
         handlers.on_stop(self.payload("Stop", last_assistant_message=f"<contextrail-handoff>\n{body}\n</contextrail-handoff>"))
 
     def project(self):
@@ -33,10 +33,10 @@ class HistoryTest(TempHome):
         self.assertEqual(code, 0)
         lines = out.splitlines()
         self.assertTrue(lines[1].startswith("  current  20"))
-        self.assertEqual(lines[2].strip(), "Next: third step")
+        self.assertEqual(lines[2].strip(), "Next: Run `third step`")
         self.assertTrue(lines[3].startswith("        1  "))
-        self.assertEqual(lines[4].strip(), "Next: second step")
-        self.assertEqual(lines[6].strip(), "Next: first step")
+        self.assertEqual(lines[4].strip(), "Next: Run `second step`")
+        self.assertEqual(lines[6].strip(), "Next: Run `first step`")
         self.assertIn("--restore N", lines[-1])
         archive = self.project().history
         self.assertEqual(len(list(archive.glob("*.md"))), 2)
@@ -48,19 +48,19 @@ class HistoryTest(TempHome):
         code, out = self.run_history("--restore", "2")
         self.assertEqual(code, 0)
         self.assertIn("Restored the handoff saved", out)
-        self.assertIn("Next: first step", out)
+        self.assertIn("Next: Run `first step`", out)
 
         project = self.project()
-        self.assertIn("1. first step", project.handoff.read_text())
+        self.assertIn("1. Run `first step`", project.handoff.read_text())
         meta = json.loads(project.meta.read_text())
         self.assertEqual(meta["head"], facts.git_state(self.repo).head)
         self.assertTrue(meta["restored_from"].endswith(".md"))
         self.assertEqual(project.resume.read_text().strip(), VALID_BODY.split("## Resume prompt\n")[1])
         _, out = self.run_history()
         self.assertEqual([line.strip() for line in out.splitlines()[2::2]][:3],
-                         ["Next: first step", "Next: third step", "Next: second step"])
+                         ["Next: Run `first step`", "Next: Run `third step`", "Next: Run `second step`"])
         loaded = handlers.on_session_start(self.payload("SessionStart", source="clear"))
-        self.assertIn("1. first step", loaded["hookSpecificOutput"]["additionalContext"])
+        self.assertIn("1. Run `first step`", loaded["hookSpecificOutput"]["additionalContext"])
 
     def test_restore_an_archive_from_before_meta_was_kept(self):
         self.save("old step")
@@ -95,7 +95,7 @@ class HistoryTest(TempHome):
         self.assertEqual(len(list(archive.glob("*.json"))), 2)
         _, out = self.run_history()
         self.assertEqual([line.strip() for line in out.splitlines()[2::2]][:3],
-                         ["Next: step 4", "Next: step 3", "Next: step 2"])
+                         ["Next: Run `step 4`", "Next: Run `step 3`", "Next: Run `step 2`"])
 
     def test_archive_order(self):
         names = ["2026-01-02T10-00-00-2.md", "2026-01-02T10-00-00.md", "2026-01-01T09-00-00.md",

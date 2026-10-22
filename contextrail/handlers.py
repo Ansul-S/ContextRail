@@ -97,19 +97,25 @@ def _open(payload: Payload) -> Tuple[Path, store.Project, Dict[str, Any]]:
     return root, project, config.load(project.dir)
 
 
+def _record(payload: Payload, root: Path) -> Tuple[Optional[facts.GitState], facts.Activity]:
+    """The facts ContextRail records itself: git state and what the session did."""
+    return facts.git_state(root), facts.session_activity(payload.get("transcript_path"), root)
+
+
 def _save(
     project: store.Project,
     root: Path,
     cfg: Dict[str, Any],
     payload: Payload,
     usage: Optional[Usage],
+    recorded: Tuple[Optional[facts.GitState], facts.Activity],
     body: str,
     notes: List[str],
     narrative_saved_at: Optional[str] = None,
 ) -> str:
-    """Write the handoff and return its resume prompt."""
-    git = facts.git_state(root)
-    activity = facts.session_activity(payload.get("transcript_path"), root)
+    """Write the handoff, with the git state and session activity recorded for it,
+    and return its resume prompt."""
+    git, activity = recorded
     saved_at = _now_iso()
     usage_line = usage.describe() if usage else "unknown context usage"
     document = handoff.render(root.name, saved_at, usage_line, git, activity, body, notes)
@@ -154,7 +160,10 @@ def on_stop(payload: Payload) -> Output:
 def _receive(
     payload: Payload, root: Path, project: store.Project, cfg: Dict[str, Any], entry: Dict[str, Any], body: str
 ) -> Output:
-    issues = handoff.problems(body, cfg["max_chars"])
+    recorded = _record(payload, root)
+    git, activity = recorded
+    checked = activity if cfg["content_checks"] else None
+    issues = handoff.problems(body, cfg["max_chars"], checked, git.dirty if git else [])
     if issues and entry["retries"] < 1:
         entry["retries"] += 1
         return {
@@ -164,7 +173,7 @@ def _receive(
         }
     usage = last_usage(payload.get("transcript_path"), cfg["window_tokens"])
     notes = [f"Saved with problems: {'; '.join(issues)}."] if issues else []
-    resume = _save(project, root, cfg, payload, usage, body, notes)
+    resume = _save(project, root, cfg, payload, usage, recorded, body, notes)
     entry.update(
         attempts=0, retries=0, saved_tokens=usage.tokens if usage else 0, warned_tokens=None, gave_up=False
     )
@@ -288,7 +297,7 @@ def on_pre_compact(payload: Payload) -> Output:
         body = handoff.fallback_body(handoff.narrative_of(previous), narrative_saved_at)
         kind = "manual" if payload.get("trigger") == "manual" else "automatic"
         notes = [f"Saved automatically before {kind} compaction, without a summary from the agent."]
-        _save(project, root, cfg, payload, usage, body, notes, narrative_saved_at)
+        _save(project, root, cfg, payload, usage, _record(payload, root), body, notes, narrative_saved_at)
     return {"systemMessage": "ContextRail: saved the session facts before compaction; they load again afterwards."}
 
 

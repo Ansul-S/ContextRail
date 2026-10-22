@@ -3,7 +3,7 @@ import os
 from unittest import mock
 
 from contextrail import handlers, store
-from tests.helpers import VALID_BODY, TempHome, assistant, git, user, write_transcript
+from tests.helpers import VALID_BODY, TempHome, assistant, git, tool_result, tool_use, user, write_transcript
 
 
 def block_message(body=VALID_BODY):
@@ -89,6 +89,29 @@ class StopTest(TempHome):
         out = self.stop(last_assistant_message=bad, stop_hook_active=True)
         self.assertIn("Saved with problems", out["systemMessage"])
         self.assertIn("> Saved with problems", self.project().handoff.read_text())
+
+    def test_checks_the_handoff_against_the_session(self):
+        (self.repo / "extra.py").write_text("x = 1\n")
+        write_transcript(self.transcript, [
+            user(), tool_use("t1", "Write", {"file_path": str(self.repo / "extra.py")}, tokens=102_000), tool_result("t1"),
+        ])
+        out = self.stop(last_assistant_message=block_message(), stop_hook_active=True)
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("- mention or explain these uncommitted files edited in this session: `extra.py`", out["reason"])
+        out = self.stop(last_assistant_message=block_message(), stop_hook_active=True)
+        self.assertIn("Saved with problems: mention or explain", out["systemMessage"])
+        self.assertIn("> Saved with problems: mention or explain", self.project().handoff.read_text())
+        self.assertIn("- Edited this session: `extra.py`", self.project().handoff.read_text())
+
+    def test_content_checks_can_be_turned_off(self):
+        (self.repo / "extra.py").write_text("x = 1\n")
+        write_transcript(self.transcript, [
+            user(), tool_use("t1", "Write", {"file_path": str(self.repo / "extra.py")}, tokens=102_000), tool_result("t1"),
+        ])
+        with mock.patch.dict(os.environ, {"CONTEXTRAIL_CONTENT_CHECKS": "0"}):
+            out = self.stop(last_assistant_message=block_message(), stop_hook_active=True)
+        self.assertNotIn("decision", out)
+        self.assertNotIn("problems", out["systemMessage"])
 
     def test_manual_handoff_saved_below_the_limit(self):
         self.at_tokens(20_000)

@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Optional
 
-from .facts import MAX_LISTED, Activity, GitState
+from .facts import MAX_LISTED, Activity, GitState, find_check
 
 TAG = "contextrail-handoff"
 BLOCK_RE = re.compile(r"<contextrail-handoff>\s*(.*?)\s*</contextrail-handoff>", re.S)
@@ -36,6 +36,26 @@ MAX_RESUME_CHARS = 800
 CLAIM_SECTIONS = ("done", "in progress")
 BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 EXCERPT_CHARS = 60
+# Content checks against the recorded facts. They are kept loose on purpose:
+# each one that fires costs a round trip, so only clear gaps should.
+MAX_UNMENTIONED = 5
+NOTHING_RE = re.compile(r"(none|nothing|n/?a)\b", re.I)
+EVIDENCE_RE = re.compile(
+    r"\b(tests?|tested|pass(ed|es|ing)?|ran|runs?|output|built|builds?|commit(s|ted)?|verif(ied|y)"
+    r"|confirmed|checked|succeeded|ok)\b",
+    re.I,
+)
+PASS_CLAIM_RE = re.compile(r"\b(pass(ed|es|ing)?|green|succeeded|ok)\b", re.I)
+# "All tests pass", "the unit tests pass now", "tests passed".
+GENERIC_PASS_RE = re.compile(r"\b(all|the)\b[^.;]*\btests?\b[^.;]*\bpass|\btests?\s+(now\s+)?pass", re.I)
+TEST_RUN_RE = re.compile(r"test|spec|jest|mocha|tox|nox", re.I)
+# Test files come with the code they test; "tests pass" covers them.
+TEST_FILE_RE = re.compile(r"(^|/)(tests?|__tests__|spec)/|(^|/)test_[^/]*$|[._-](test|spec)\.[^/]+$|_test\.[^/]+$")
+WAITING_RE = re.compile(r"wait for the user", re.I)
+# A path, a command or name in backticks, a quoted request, an identifier, an issue number.
+CONCRETE_RE = re.compile(
+    r"[`\"“”]|\w/\w|\b\w+\.[A-Za-z]{1,5}\b|\b\w+_\w+\b|\w\(\)|\b[a-z]+[A-Z]\w*|\b(?=\w*\d)(?=\w*[A-Za-z])\w+\b|#\d+"
+)
 
 
 def extract(text: Optional[str]) -> Optional[str]:
@@ -54,7 +74,84 @@ def sections(body: str) -> Dict[str, str]:
     return {_key(parts[i]): parts[i + 1].strip() for i in range(1, len(parts) - 1, 2)}
 
 
-def problems(body: str, max_chars: int) -> List[str]:
+def _name_pattern(names: List[str]) -> "re.Pattern[str]":
+    # A whole name only: app.py is not in myapp.py or app.pyc, but is in src/app.py.
+    names = sorted(set(names), key=len, reverse=True)
+    return re.compile(r"(?<![\w.-])(?:" + "|".join(map(re.escape, names)) + r")(?![\w/-]|\.\w)")
+
+
+def _items(text: str) -> List[str]:
+    return [BULLET_RE.sub("", line).strip() for line in text.splitlines() if line.strip()]
+
+
+def _uncommitted(path: str, dirty: List[str]) -> bool:
+    # git lists a new folder as one entry, "folder/".
+    return path in dirty or any(entry.endswith("/") and path.startswith(entry) for entry in dirty)
+
+
+def _mentioned(path: str, body: str) -> bool:
+    """Whether the narrative names the file: by path, by file name, by name without
+    the extension (`handoff`, `handoff.render`, CHANGELOG), or by its folder."""
+    name = path.rsplit("/", 1)[-1]
+    if _name_pattern([path, name]).search(body):
+        return True
+    stem = name.split(".")[0]
+    if len(stem) > 2 and re.search(rf"(?<![\w./-]){re.escape(stem)}(?![\w/-])", body):
+        return True
+    folder = path.rsplit("/", 1)[0] + "/" if "/" in path else ""
+    return bool(folder) and re.search(rf"(?<![\w.-]){re.escape(folder)}(?![\w-]|\.\w)", body) is not None
+
+
+def _claims_pass(item: str, command: str, superseded: bool) -> bool:
+    """Whether a Done item says this failed check passed: by quoting it, or, for a
+    test run no later test run passed after, with a general claim that quotes no
+    check of its own."""
+    if f"`{command}`" in item:
+        return bool(PASS_CLAIM_RE.search(item))
+    if superseded or not TEST_RUN_RE.search(command):
+        return False
+    quotes_a_check = any(find_check(span) for span in re.findall(r"`([^`]+)`", item))
+    return not quotes_a_check and bool(GENERIC_PASS_RE.search(item))
+
+
+def content_problems(body: str, activity: Activity, dirty: List[str]) -> List[str]:
+    """Gaps between the handoff and what ContextRail recorded in the session."""
+    found = sections(body)
+    issues = []
+    # Committed files have their commit messages; uncommitted ones only have the handoff.
+    unmentioned = [
+        path for path in activity.edited
+        if _uncommitted(path, dirty) and not TEST_FILE_RE.search(path) and not _mentioned(path, body)
+    ]
+    if unmentioned:
+        listed = ", ".join(f"`{path}`" for path in unmentioned[:MAX_UNMENTIONED])
+        more = f" and {len(unmentioned) - MAX_UNMENTIONED} more" if len(unmentioned) > MAX_UNMENTIONED else ""
+        issues.append(f"mention or explain these uncommitted files edited in this session: {listed}{more}")
+    done = [item for item in _items(found.get("done", "")) if not NOTHING_RE.match(item)]
+    if done and not any(EVIDENCE_RE.search(item) for item in done):
+        issues.append(
+            "'## Done' gives no evidence (a test, command output or commit): "
+            "add it, or move the items to '## In progress'"
+        )
+    steps = _items(found.get("next steps", ""))
+    if steps and not WAITING_RE.search(steps[0]) and not CONCRETE_RE.search(steps[0]):
+        issues.append("make step 1 of '## Next steps' concrete: name the file, function or command")
+    for i, (command, result) in enumerate(activity.checks):
+        if result != "failed":
+            continue
+        superseded = any(later == "passed" and TEST_RUN_RE.search(c) for c, later in activity.checks[i + 1:])
+        if any(_claims_pass(item, command, superseded) for item in done):
+            issues.append(
+                f"the facts show `{command}` failed, but '## Done' says it passed: correct that, or run it again"
+            )
+    return issues
+
+
+def problems(
+    body: str, max_chars: int, activity: Optional[Activity] = None, dirty: Optional[List[str]] = None
+) -> List[str]:
+    """What keeps the handoff from being saved as it is. With the session's
+    activity, also check its content against the recorded facts."""
     found = sections(body)
     issues = []
     missing = [name for name in REQUIRED if not found.get(_key(name))]
@@ -67,6 +164,8 @@ def problems(body: str, max_chars: int) -> List[str]:
         )
     if len(found.get("resume prompt", "")) > MAX_RESUME_CHARS:
         issues.append(f"'## Resume prompt' is over {MAX_RESUME_CHARS} characters; keep it to 2-3 lines")
+    if activity is not None:
+        issues += content_problems(body, activity, dirty or [])
     return issues
 
 
@@ -78,14 +177,11 @@ def mentions(narrative: str, paths: List[str]) -> List[str]:
     """Done and In progress items that name one of these files, by path or file name, as excerpts."""
     if not paths:
         return []
-    names = sorted(set(paths) | {path.rsplit("/", 1)[-1] for path in paths}, key=len, reverse=True)
-    # A whole name only: app.py is not in myapp.py or app.pyc, but is in src/app.py.
-    pattern = re.compile(r"(?<![\w.-])(?:" + "|".join(map(re.escape, names)) + r")(?![\w/-]|\.\w)")
+    pattern = _name_pattern(paths + [path.rsplit("/", 1)[-1] for path in paths])
     found = sections(narrative)
     items: List[str] = []
     for key in CLAIM_SECTIONS:
-        for line in found.get(key, "").splitlines():
-            text = BULLET_RE.sub("", line).strip()
+        for text in _items(found.get(key, "")):
             match = pattern.search(text)
             excerpt = _excerpt(text, match) if match else None
             if excerpt and excerpt not in items:

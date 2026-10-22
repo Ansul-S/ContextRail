@@ -122,6 +122,7 @@ Settings are applied in this order, later ones winning:
   "window_tokens": null,
   "refresh_tokens": 40000,
   "max_chars": 12000,
+  "content_checks": true,
   "max_attempts": 3,
   "inject_on": ["startup", "clear", "compact"],
   "max_age_days": 30,
@@ -132,6 +133,7 @@ Settings are applied in this order, later ones winning:
 ```
 
 - `max_chars` caps the part the agent writes, which keeps the handoff to about 3k tokens when it is loaded.
+- `content_checks` holds the handoff against what ContextRail recorded before saving it: uncommitted files edited in the session that it never mentions, a Done section with no evidence, a first next step with nothing concrete in it, and a Done item that says a check passed when the facts show it failed. A gap gets the one fix request.
 - `inject_on` sets which session starts load the handoff (`startup`, `clear`, `compact`, `resume`).
 - To turn ContextRail off everywhere, set `CONTEXTRAIL_DISABLE=1`. To turn it off for one project, put `{"enabled": false}` in that project's `config.json`.
 
@@ -162,7 +164,7 @@ Compaction is a generic summary written at the last moment, and you stay in the 
 Hooks can't run slash commands, and leaving `/clear` to you means you decide when to switch. If you'd rather it switched by itself, install the optional `contextrail-continue` plugin (see Hands-free continue).
 
 **What if the agent ignores the request?**
-ContextRail asks at most three times per session, then tells you to run `/contextrail:handoff` when you are ready. An incomplete handoff gets one request for a fix. After that it is saved anyway, with a warning.
+ContextRail asks at most three times per session, then tells you to run `/contextrail:handoff` when you are ready. An incomplete handoff, or one that leaves out what the session's facts show (see `content_checks`), gets one request for a fix. After that it is saved anyway, with a warning.
 
 **Does it work alongside other context monitors (such as GSD's)?**
 Yes. ContextRail fires earlier than most warnings, so the handoff usually exists by the time they appear. Some monitors tell the agent not to write handoffs unless asked. ContextRail's request says the user set it up, which counts as asking.
