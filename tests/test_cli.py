@@ -1,0 +1,80 @@
+import json
+import os
+import subprocess
+import sys
+
+from contextrail import prompts
+from tests.helpers import CR, ROOT, VALID_BODY, TempHome
+
+
+class CliTest(TempHome):
+    def run_cr(self, *args, stdin=""):
+        return subprocess.run(
+            [sys.executable, str(CR), *args], input=stdin, capture_output=True, text=True,
+            env=dict(os.environ), timeout=30,
+        )
+
+    def test_stop_hook_prints_json(self):
+        self.at_tokens(102_000)
+        result = self.run_cr("stop", stdin=json.dumps(self.payload("Stop", last_assistant_message="ok")))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["decision"], "block")
+
+    def test_silent_below_the_limit(self):
+        self.at_tokens(10_000)
+        result = self.run_cr("stop", stdin=json.dumps(self.payload("Stop", last_assistant_message="ok")))
+        self.assertEqual((result.returncode, result.stdout), (0, ""))
+
+    def test_bad_input_never_fails_the_hook(self):
+        for stdin in ("not json", "[1, 2]", ""):
+            result = self.run_cr("session-start", stdin=stdin)
+            self.assertEqual((result.returncode, result.stdout), (0, ""))
+
+    def test_errors_are_logged_not_raised(self):
+        result = self.run_cr("stop", stdin=json.dumps({"cwd": 12345, "transcript_path": ["x"]}))
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue((self.home / "error.log").exists())
+
+    def test_status(self):
+        self.at_tokens(10_000)
+        self.run_cr("stop", stdin=json.dumps(self.payload(
+            "Stop", last_assistant_message=f"<contextrail-handoff>\n{VALID_BODY}\n</contextrail-handoff>")))
+        result = self.run_cr("status", str(self.repo))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"Project:   {self.repo}", result.stdout)
+        self.assertIn("Triggers:  handoff at 100,000 tokens, wrap-up at 130,000", result.stdout)
+        self.assertIn("Handoff:   saved just now", result.stdout)
+
+    def test_unknown_command_and_help(self):
+        self.assertEqual(self.run_cr("nope").returncode, 2)
+        self.assertIn("ContextRail", self.run_cr("--help").stdout)
+
+
+class PluginFilesTest(TempHome):
+    def test_manifests_are_valid_json(self):
+        for path in (".claude-plugin/plugin.json", ".claude-plugin/marketplace.json", "hooks/hooks.json"):
+            json.loads((ROOT / path).read_text())
+
+    def test_versions_match(self):
+        from contextrail import __version__
+        plugin = json.loads((ROOT / ".claude-plugin/plugin.json").read_text())
+        market = json.loads((ROOT / ".claude-plugin/marketplace.json").read_text())
+        self.assertEqual(plugin["version"], __version__)
+        self.assertEqual(market["plugins"][0]["version"], __version__)
+
+    def test_hooks_point_at_real_commands(self):
+        hooks = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]
+        for groups in hooks.values():
+            for group in groups:
+                for hook in group["hooks"]:
+                    command = hook["command"]
+                    self.assertIn('"${CLAUDE_PLUGIN_ROOT}/contextrail/cr.py"', command)
+                    self.assertIn(command.split()[-1], ("stop", "post-tool", "pre-compact", "session-start"))
+
+    def test_handoff_command_matches_the_hook_prompt(self):
+        command = (ROOT / "commands/handoff.md").read_text()
+        self.assertIn(prompts.TEMPLATE, command)
+        self.assertIn(prompts.RULES.format(max_chars=8_000), command)
+
+    def test_entry_point_is_executable(self):
+        self.assertTrue(os.access(CR, os.X_OK))

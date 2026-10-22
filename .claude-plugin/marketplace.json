@@ -1,0 +1,17 @@
+{
+  "name": "contextrail",
+  "description": "ContextRail: automatic session handoff for Claude Code.",
+  "owner": {
+    "name": "Ansul-S"
+  },
+  "plugins": [
+    {
+      "name": "contextrail",
+      "source": "./",
+      "description": "Saves a handoff before long Claude Code sessions lose quality, and loads it into the next session.",
+      "version": "0.1.0",
+      "category": "productivity",
+      "homepage": "https://github.com/Ansul-S/contextrail"
+    }
+  ]
+}

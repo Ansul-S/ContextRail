@@ -1,0 +1,18 @@
+{
+  "name": "contextrail",
+  "version": "0.1.0",
+  "description": "Saves a handoff before long Claude Code sessions lose quality, and loads it into the next session.",
+  "author": {
+    "name": "Ansul-S"
+  },
+  "homepage": "https://github.com/Ansul-S/contextrail",
+  "repository": "https://github.com/Ansul-S/contextrail",
+  "license": "MIT",
+  "keywords": [
+    "context",
+    "handoff",
+    "session",
+    "memory",
+    "hooks"
+  ]
+}

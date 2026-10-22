@@ -1,0 +1,271 @@
+"""Hook handlers. Each takes the hook's JSON payload and returns the JSON
+object to print, or None to stay silent."""
+
+from __future__ import annotations
+
+import datetime as dt
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from . import __version__, config, facts, handoff, prompts, store
+from .usage import Usage, last_assistant_text, last_usage
+
+Payload = Dict[str, Any]
+Output = Optional[Dict[str, Any]]
+
+WARN_EVERY_TOKENS = 30_000
+
+
+def _now_iso() -> str:
+    return dt.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def age_seconds(saved_at: str) -> Optional[float]:
+    try:
+        then = dt.datetime.fromisoformat(saved_at)
+    except (TypeError, ValueError):
+        return None
+    if then.tzinfo is None:
+        then = then.astimezone()
+    return max(0.0, (dt.datetime.now().astimezone() - then).total_seconds())
+
+
+def describe_age(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "at an unknown time"
+    if seconds < 90:
+        return "just now"
+    for size, unit in ((86_400, "day"), (3_600, "hour"), (60, "minute")):
+        if seconds >= size:
+            count = int(seconds // size)
+            return f"{count} {unit}{'' if count == 1 else 's'} ago"
+    return "just now"
+
+
+def tilde(path: Path) -> str:
+    home = str(Path.home())
+    text = str(path)
+    return "~" + text[len(home):] if text.startswith(home + os.sep) else text
+
+
+def copy_to_clipboard(text: str) -> bool:
+    if sys.platform == "darwin":
+        candidates = [["pbcopy"]]
+    elif sys.platform.startswith("win"):
+        candidates = [["clip"]]
+    else:
+        candidates = [["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]
+    for command in candidates:
+        if shutil.which(command[0]) is None:
+            continue
+        try:
+            # No pipes on stdout/stderr: xclip keeps them open after it forks.
+            subprocess.run(
+                command, input=text, text=True, timeout=3, check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return True
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return False
+
+
+def _open(payload: Payload) -> Tuple[Path, store.Project, Dict[str, Any]]:
+    root = facts.project_root(str(payload.get("cwd") or os.getcwd()))
+    project = store.Project(root)
+    return root, project, config.load(project.dir)
+
+
+def _save(
+    project: store.Project,
+    root: Path,
+    cfg: Dict[str, Any],
+    payload: Payload,
+    usage: Optional[Usage],
+    body: str,
+    notes: List[str],
+    narrative_saved_at: Optional[str] = None,
+) -> str:
+    """Write the handoff and return its resume prompt."""
+    git = facts.git_state(root)
+    activity = facts.session_activity(payload.get("transcript_path"), root)
+    saved_at = _now_iso()
+    usage_line = usage.describe() if usage else "unknown context usage"
+    document = handoff.render(root.name, saved_at, usage_line, git, activity, body, notes)
+    meta = {
+        "version": __version__,
+        "saved_at": saved_at,
+        "narrative_saved_at": narrative_saved_at or saved_at,
+        "session_id": payload.get("session_id"),
+        "tokens": usage.tokens if usage else None,
+        "branch": git.branch if git else None,
+        "head": git.head if git else None,
+        "dirty": git.dirty if git else [],
+        "diff_hash": git.diff_hash if git else None,
+    }
+    resume = handoff.resume_prompt(body)
+    store.save_handoff(project, document, meta, resume, cfg["history_keep"])
+    return resume
+
+
+def on_stop(payload: Payload) -> Output:
+    root, project, cfg = _open(payload)
+    if not cfg["enabled"]:
+        return None
+    transcript = payload.get("transcript_path")
+    message = payload.get("last_assistant_message")
+    if not isinstance(message, str):
+        message = last_assistant_text(transcript)
+    body = handoff.extract(message)
+    with store.locked(project):
+        state = store.load_state(project)
+        entry = store.session(state, str(payload.get("session_id") or ""))
+        entry["updated"] = time.time()
+        if body is not None:
+            output = _receive(payload, root, project, cfg, entry, body)
+        else:
+            output = _maybe_request(payload, cfg, entry)
+        store.save_state(project, state)
+    return output
+
+
+def _receive(
+    payload: Payload, root: Path, project: store.Project, cfg: Dict[str, Any], entry: Dict[str, Any], body: str
+) -> Output:
+    issues = handoff.problems(body, cfg["max_chars"])
+    if issues and entry["retries"] < 1:
+        entry["retries"] += 1
+        return {
+            "decision": "block",
+            "reason": prompts.fix(issues),
+            "systemMessage": "ContextRail: the handoff is incomplete; asking for a fix.",
+        }
+    usage = last_usage(payload.get("transcript_path"), cfg["window_tokens"])
+    notes = [f"Saved with problems: {'; '.join(issues)}."] if issues else []
+    resume = _save(project, root, cfg, payload, usage, body, notes)
+    entry.update(
+        attempts=0, retries=0, saved_tokens=usage.tokens if usage else 0, warned_tokens=None, gave_up=False
+    )
+    message = (
+        f"ContextRail: handoff saved to {tilde(project.handoff)}. Type /clear to continue in a "
+        "fresh session; the handoff loads automatically."
+    )
+    if resume and cfg["copy_resume_prompt"] and copy_to_clipboard(resume):
+        message += " The resume prompt is on your clipboard."
+    if issues:
+        message += f" Saved with problems: {'; '.join(issues)}."
+    return {"systemMessage": message}
+
+
+def _maybe_request(payload: Payload, cfg: Dict[str, Any], entry: Dict[str, Any]) -> Output:
+    if payload.get("stop_hook_active"):
+        return None  # never chain requests; the next turn will ask again
+    usage = last_usage(payload.get("transcript_path"), cfg["window_tokens"])
+    if usage is None:
+        return None
+    limits = config.thresholds(cfg, usage.window)
+    saved = entry["saved_tokens"]
+    if usage.tokens < limits.soft or (saved is not None and usage.tokens < saved + cfg["refresh_tokens"]):
+        return None
+    if entry["attempts"] >= cfg["max_attempts"]:
+        if entry["gave_up"]:
+            return None
+        entry["gave_up"] = True
+        return {
+            "systemMessage": (
+                f"ContextRail: asked {entry['attempts']} times for a handoff and none was written. "
+                "Run /contextrail:handoff when you are ready."
+            )
+        }
+    entry["attempts"] += 1
+    entry["retries"] = 0
+    return {
+        "decision": "block",
+        "reason": prompts.request(usage.describe(), cfg["max_chars"], refresh=saved is not None),
+        "systemMessage": f"ContextRail: context is at {usage.tokens:,} tokens; asking for a handoff.",
+    }
+
+
+def on_post_tool(payload: Payload) -> Output:
+    if payload.get("agent_id"):
+        return None  # a subagent's tool call; its context is not the main one
+    root, project, cfg = _open(payload)
+    if not cfg["enabled"]:
+        return None
+    usage = last_usage(payload.get("transcript_path"), cfg["window_tokens"])
+    if usage is None or usage.tokens < config.thresholds(cfg, usage.window).hard:
+        return None
+    with store.locked(project):
+        state = store.load_state(project)
+        entry = store.session(state, str(payload.get("session_id") or ""))
+        saved, warned = entry["saved_tokens"], entry["warned_tokens"]
+        if saved is not None and usage.tokens < saved + cfg["refresh_tokens"]:
+            return None
+        if warned is not None and usage.tokens < warned + WARN_EVERY_TOKENS:
+            return None
+        entry["warned_tokens"] = usage.tokens
+        entry["updated"] = time.time()
+        store.save_state(project, state)
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": prompts.wrap_up(usage.describe()),
+        }
+    }
+
+
+def on_pre_compact(payload: Payload) -> Output:
+    root, project, cfg = _open(payload)
+    if not cfg["enabled"]:
+        return None
+    usage = last_usage(payload.get("transcript_path"), cfg["window_tokens"])
+    with store.locked(project):
+        state = store.load_state(project)
+        entry = store.session(state, str(payload.get("session_id") or ""))
+        saved = entry["saved_tokens"]
+        fresh = saved is not None and usage is not None and usage.tokens < saved + cfg["refresh_tokens"]
+        # Context starts small again after compaction, so the next request is due at the soft limit.
+        entry.update(attempts=0, retries=0, saved_tokens=None, warned_tokens=None, gave_up=False)
+        entry["updated"] = time.time()
+        store.save_state(project, state)
+        if fresh:
+            return None
+        previous = project.handoff.read_text(encoding="utf-8") if project.handoff.exists() else ""
+        previous_meta = store.read_json(project.meta)
+        narrative_saved_at = previous_meta.get("narrative_saved_at") if previous else None
+        body = handoff.fallback_body(handoff.narrative_of(previous), narrative_saved_at)
+        kind = "manual" if payload.get("trigger") == "manual" else "automatic"
+        notes = [f"Saved automatically before {kind} compaction, without a summary from the agent."]
+        _save(project, root, cfg, payload, usage, body, notes, narrative_saved_at)
+    return {"systemMessage": "ContextRail: saved the session facts before compaction; they load again afterwards."}
+
+
+def on_session_start(payload: Payload) -> Output:
+    root, project, cfg = _open(payload)
+    source = str(payload.get("source") or "startup")
+    if not cfg["enabled"] or source not in cfg["inject_on"] or not project.handoff.exists():
+        return None
+    meta = store.read_json(project.meta)
+    saved_at = str(meta.get("saved_at") or "")
+    seconds = age_seconds(saved_at)
+    if seconds is not None and seconds > cfg["max_age_days"] * 86_400:
+        return None
+    try:
+        document = project.handoff.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    notes = facts.drift(meta, root)
+    age = describe_age(seconds)
+    changes = f"{len(notes)} repo change(s) since" if notes else "no repo changes since"
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": prompts.loaded(saved_at, age, notes, document),
+        },
+        "systemMessage": f"ContextRail: loaded the handoff saved {age} ({changes}).",
+    }

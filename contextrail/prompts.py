@@ -1,0 +1,93 @@
+"""Text that ContextRail sends to the agent. commands/handoff.md repeats
+TEMPLATE and RULES; tests keep the two in sync."""
+
+from __future__ import annotations
+
+from typing import List
+
+TEMPLATE = """<contextrail-handoff>
+## Goal
+What we are building or fixing, and why (1-2 sentences).
+
+## Done
+- Finished and verified in this session, with the evidence (test, command output, commit).
+
+## In progress
+- Half-finished work: file:line, its current state, what is left.
+
+## Next steps
+1. The very next concrete action.
+2. ...
+
+## Decisions
+- Decision, and why (include constraints the user set).
+
+## Dead ends
+- What was tried and why it failed, so it is not retried.
+
+## Open questions
+- Questions waiting on the user, or "None".
+
+## Verify first
+- Commands that confirm the state before continuing.
+
+## Resume prompt
+Two or three lines the user can paste into the next session to continue.
+</contextrail-handoff>"""
+
+RULES = """- Be specific and brief: file paths, function names, commands, numbers.
+- List an item under Done only if it was verified in this session. Anything unverified goes under In progress, marked unverified.
+- If a handoff from an earlier session was loaded at the start, carry forward its Decisions and Dead ends that still apply, and drop what is finished.
+- Leave out secrets, tokens and credentials.
+- Stay under {max_chars:,} characters. Git state, edited files and test commands are recorded automatically, so don't repeat them."""
+
+
+def request(usage_line: str, max_chars: int, refresh: bool) -> str:
+    opening = (
+        f"ContextRail: this session is at {usage_line}. "
+        "The user set up ContextRail to save a handoff at this point, before answer quality "
+        "drops, so the next session can start fresh from it."
+    )
+    if refresh:
+        opening += " Context has grown a lot since the last handoff, so write a fresh one."
+    return (
+        f"{opening}\n\n"
+        "Reply with the handoff block below, filled in. No tool calls are needed.\n"
+        f"{RULES.format(max_chars=max_chars)}\n\n"
+        f"{TEMPLATE}\n\n"
+        "After the block, add one line only if you were waiting on the user: repeat that question."
+    )
+
+
+def fix(issues: List[str]) -> str:
+    listed = "\n".join(f"- {issue}" for issue in issues)
+    return (
+        "ContextRail: the handoff needs fixing before it can be saved:\n"
+        f"{listed}\n\n"
+        "Reply with the complete, corrected <contextrail-handoff> block."
+    )
+
+
+def wrap_up(usage_line: str) -> str:
+    return (
+        f"ContextRail: this session is at {usage_line}, past the wrap-up point. "
+        "Don't start new work. Bring the current step to a safe stopping point "
+        "(no half-applied edits), then end your turn. ContextRail will then ask for a handoff."
+    )
+
+
+def loaded(saved_at: str, age: str, drift_notes: List[str], document: str) -> str:
+    drift_text = "\n".join(f"- {note}" for note in drift_notes) if drift_notes else "- None detected."
+    return (
+        f'<contextrail-previous-handoff saved="{saved_at}" age="{age}">\n'
+        "ContextRail loaded the handoff written at the end of the previous session in this "
+        "project. Use it as background:\n"
+        "- Check its claims against the code before relying on them, starting with the "
+        "changes listed below.\n"
+        "- Don't redo work listed as done, and don't retry the dead ends.\n"
+        "- Wait for the user's message before starting work.\n\n"
+        "Changes in the repository since the handoff:\n"
+        f"{drift_text}\n\n"
+        f"{document.strip()}\n"
+        "</contextrail-previous-handoff>"
+    )
