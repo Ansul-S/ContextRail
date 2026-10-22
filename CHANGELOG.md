@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.0 (2026-10-23)
+
+Handoffs come after a full session's work, not halfway through it.
+
+### Upgrading
+
+- Update both plugins, then restart Claude Code.
+- If you raised `soft_tokens` or `hard_tokens` in a `config.json` to make room for the session's start, lower them again. Otherwise the start is counted twice.
+- On a model with a 1M window whose name doesn't say `[1m]`, run `/contextrail:doctor --setup-statusline` or set `window_tokens`. Without either, ContextRail assumes a 200k window, and its 50% share keeps the handoff at 100k.
+
+### Triggers
+
+- **The triggers count from the session's start:** a session holds 30-50k tokens before any work (Claude Code's system prompt and tools, skills, MCP instructions, memory files and the loaded handoff), so on a 1M window the handoff at 100k left about 50k tokens of work. `soft_tokens`, `hard_tokens` and `checkpoint_tokens` now count from the context at the session's first reply, or at the first reply after compaction. With a 50k start, the handoff comes at about 150k and the wrap-up at 180k. `soft_pct` and `hard_pct` still cap the total, so on a 200k window the handoff stays at 100k, before auto-compaction. `/contextrail:status` shows the start, and the status line's handoff point moves with it.
+
 ## 0.3.0 (2026-10-23)
 
 A status line that shows how far the session is from its next handoff.

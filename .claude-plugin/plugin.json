@@ -1,6 +1,6 @@
 {
   "name": "contextrail",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Saves a handoff before long Claude Code sessions lose quality, and loads it into the next session.",
   "author": {
     "name": "Ansul-S"
