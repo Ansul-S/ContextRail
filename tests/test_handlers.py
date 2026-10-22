@@ -252,3 +252,20 @@ class AgeTest(TempHome):
         self.assertEqual(handlers.describe_age(600), "10 minutes ago")
         self.assertEqual(handlers.describe_age(3_600), "1 hour ago")
         self.assertEqual(handlers.describe_age(3 * 86_400), "3 days ago")
+
+
+class HeartbeatTest(TempHome):
+    def beats(self):
+        return json.loads((self.home / handlers.HEARTBEAT).read_text())
+
+    def test_written_at_most_once_a_minute(self):
+        handlers.heartbeat("Stop")
+        first = self.beats()["Stop"]
+        (self.home / handlers.HEARTBEAT).write_text(json.dumps({"Stop": first - 30}))
+        handlers.heartbeat("Stop")
+        self.assertEqual(self.beats(), {"Stop": first - 30})
+        (self.home / handlers.HEARTBEAT).write_text(json.dumps({"Stop": first - 61}))
+        handlers.heartbeat("Stop")
+        handlers.heartbeat("PreCompact")
+        self.assertEqual(sorted(self.beats()), ["PreCompact", "Stop"])
+        self.assertGreaterEqual(self.beats()["Stop"], first)

@@ -2,22 +2,13 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
-from . import __version__, config, facts, store
-from .handlers import age_seconds, describe_age, tilde
-from .usage import DEFAULT_WINDOW, last_usage
-
-
-def latest_transcript(cwd: Path) -> Optional[Path]:
-    """Newest Claude Code transcript for sessions started in cwd."""
-    claude_home = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
-    candidates: List[Path] = []
-    for folder in {cwd, cwd.resolve()}:
-        candidates += (claude_home / "projects" / store.slug(folder)).glob("*.jsonl")
-    return max(candidates, key=lambda path: path.stat().st_mtime, default=None)
+from . import __version__, config, doctor, facts, store
+from .config import tilde
+from .handlers import age_seconds, describe_age
+from .usage import DEFAULT_WINDOW, last_usage, transcripts
 
 
 def main(args: List[str]) -> int:
@@ -29,8 +20,8 @@ def main(args: List[str]) -> int:
     print(f"Project:   {root}")
     print(f"Storage:   {tilde(project.dir)}")
 
-    transcript = latest_transcript(cwd)
-    usage = last_usage(str(transcript), cfg["window_tokens"]) if transcript else None
+    found = transcripts(cwd)
+    usage = last_usage(str(found[0]), cfg["window_tokens"]) if found else None
     limits = config.thresholds(cfg, usage.window if usage else cfg["window_tokens"] or DEFAULT_WINDOW)
     if usage:
         print(f"Context:   {usage.describe()}, latest session")
@@ -40,6 +31,9 @@ def main(args: List[str]) -> int:
         f"Triggers:  handoff at {limits.soft:,} tokens, wrap-up at {limits.hard:,}, "
         f"then again every {cfg['refresh_tokens']:,}"
     )
+    errors = doctor.recent_errors(doctor.DAY)
+    if errors:
+        print(f"Errors:    {len(errors)} in the last 24 h. Run /contextrail:doctor")
 
     if not project.handoff.exists():
         print("Handoff:   none saved yet")

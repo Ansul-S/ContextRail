@@ -10,7 +10,10 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Iterator, Optional, Tuple
+from pathlib import Path
+from typing import Iterator, List, Optional, Tuple
+
+from .store import slug
 
 DEFAULT_WINDOW = 200_000
 LARGE_WINDOW = 1_000_000
@@ -60,6 +63,19 @@ def reverse_lines(path: str, max_bytes: int = MAX_SCAN) -> Iterator[bytes]:
             line = b"".join(reversed(tail))
             if line.strip():
                 yield line
+
+
+def claude_projects() -> Path:
+    """The folder where Claude Code keeps a transcript folder per working directory."""
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
+
+
+def transcripts(cwd: Path) -> List[Path]:
+    """Claude Code transcripts of sessions started in cwd, newest first."""
+    found = set()
+    for folder in {cwd, cwd.resolve()}:
+        found.update((claude_projects() / slug(folder)).glob("*.jsonl"))
+    return sorted(found, key=lambda path: path.stat().st_mtime, reverse=True)
 
 
 def resolve_window(model: str, tokens: int, configured: Optional[int]) -> Tuple[int, str]:

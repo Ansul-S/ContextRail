@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Optional
 
-from .facts import Activity, GitState
+from .facts import MAX_LISTED, Activity, GitState
 
 TAG = "contextrail-handoff"
 BLOCK_RE = re.compile(r"<contextrail-handoff>\s*(.*?)\s*</contextrail-handoff>", re.S)
@@ -70,6 +70,20 @@ def narrative_of(document: str) -> str:
     return rest.strip() if mark else ""
 
 
+def _edited(activity: Activity) -> str:
+    """The files edited in the project, with the rest only counted."""
+    listed = ", ".join(f"`{path}`" for path in activity.edited[-MAX_LISTED:])
+    counted = []
+    if len(activity.edited) > MAX_LISTED:
+        counted.append(f"{len(activity.edited) - MAX_LISTED} more")
+    if activity.outside:
+        counted.append(f"{activity.outside} file{'' if activity.outside == 1 else 's'} outside the project")
+    text = ", ".join([part for part in [listed] if part] + counted[:-1])
+    if counted:
+        text = f"{text} and {counted[-1]}" if text else counted[-1]
+    return text
+
+
 def render(
     project: str,
     saved_at: str,
@@ -92,11 +106,10 @@ def render(
             lines.append(f"- Uncommitted ({len(git.dirty)}): {shown}{more}")
         else:
             lines.append("- Working tree clean")
-    if activity.edited:
-        lines.append("- Edited this session: " + ", ".join(f"`{path}`" for path in activity.edited))
+    if activity.edited or activity.outside:
+        lines.append("- Edited this session: " + _edited(activity))
     if activity.checks:
-        results = {True: "passed", False: "failed", None: "result unknown"}
-        lines.append("- Recent checks: " + "; ".join(f"`{cmd}` {results[ok]}" for cmd, ok in activity.checks))
+        lines.append("- Recent checks: " + "; ".join(f"`{cmd}` {result}" for cmd, result in activity.checks))
     for note in notes:
         lines += ["", f"> {note}"]
     lines += ["", NARRATIVE_MARK, "", body.strip(), ""]

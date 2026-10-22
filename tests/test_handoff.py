@@ -42,18 +42,30 @@ class SectionsTest(unittest.TestCase):
 class RenderTest(unittest.TestCase):
     def test_facts_on_top_narrative_below(self):
         git = GitState(branch="main", head="abcdef1234567", subject="Add limiter", dirty=["api/app.py"], diff_hash="h")
-        activity = Activity(edited=["api/app.py"], checks=[("pytest -q", True), ("npm run build", False)])
+        checks = [("pytest -q", "passed"), ("npm run build", "failed"), ("pnpm lint", "ran")]
+        activity = Activity(edited=["api/app.py"], outside=2, checks=checks)
         doc = handoff.render("api", "2026-10-22T18:00:00+05:30", "100 tokens", git, activity, VALID_BODY, ["note"])
         self.assertTrue(doc.startswith("# Handoff: api\n"))
         self.assertIn("- Branch `main` at `abcdef123` Add limiter", doc)
         self.assertIn("- Uncommitted (1): `api/app.py`", doc)
-        self.assertIn("`pytest -q` passed; `npm run build` failed", doc)
+        self.assertIn("- Edited this session: `api/app.py` and 2 files outside the project\n", doc)
+        self.assertIn("- Recent checks: `pytest -q` passed; `npm run build` failed; `pnpm lint` ran\n", doc)
         self.assertIn("> note", doc)
         self.assertEqual(handoff.narrative_of(doc), VALID_BODY)
 
     def test_not_a_repo(self):
         doc = handoff.render("x", "t", "u", None, Activity(), VALID_BODY, [])
         self.assertIn("- Not a git repository.", doc)
+        self.assertNotIn("Edited this session", doc)
+
+    def test_long_and_outside_edit_lists(self):
+        many = Activity(edited=[f"f{i}.py" for i in range(17)], outside=1)
+        doc = handoff.render("x", "t", "u", None, many, VALID_BODY, [])
+        self.assertIn("`f2.py`, ", doc)
+        self.assertIn("`f16.py`, 2 more and 1 file outside the project\n", doc)
+        self.assertNotIn("`f1.py`", doc)
+        only_outside = handoff.render("x", "t", "u", None, Activity(outside=3), VALID_BODY, [])
+        self.assertIn("- Edited this session: 3 files outside the project\n", only_outside)
 
 
 class FallbackTest(unittest.TestCase):

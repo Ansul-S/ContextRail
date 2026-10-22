@@ -54,6 +54,34 @@ class ConfigTest(TempHome):
         with mock.patch.dict(os.environ, {"CONTEXTRAIL_DISABLE": "1"}):
             self.assertFalse(config.load()["enabled"])
 
+    def test_problems_lists_what_load_ignores(self):
+        self.assertEqual(config.problems(), [])
+        self.home.mkdir(parents=True)
+        (self.home / "config.json").write_text(json.dumps({
+            "sof_tokens": 1, "soft_pct": 150, "inject_on": ["startup", "Resume"], "hard_tokens": 120_000,
+        }))
+        project_dir = self.home / "projects" / "p"
+        project_dir.mkdir(parents=True)
+        (project_dir / "config.json").write_text("[1, 2]")
+        env = {"CONTEXTRAIL_SOFT_TOKENS": "lots", "CONTEXTRAIL_DISABLE": "1", "CONTEXTRAIL_WINDOW": "1000000"}
+        with mock.patch.dict(os.environ, env):
+            found = config.problems(project_dir)
+        path = self.home / "config.json"
+        self.assertEqual(found, [
+            f"{path}: 'sof_tokens' is not a setting (did you mean 'soft_tokens'?)",
+            f"{path}: 'soft_pct' has an invalid value, 150",
+            f"{path}: 'inject_on' has unknown sources ['Resume']; use startup, resume, clear, compact",
+            f"{project_dir / 'config.json'} must hold a JSON object",
+            "CONTEXTRAIL_SOFT_TOKENS has an invalid value, \"lots\"",
+            "CONTEXTRAIL_WINDOW is not a setting (did you mean 'window_tokens'?)",
+        ])
+
+    def test_problems_with_unreadable_json(self):
+        self.home.mkdir(parents=True)
+        (self.home / "config.json").write_text("{not json")
+        [problem] = config.problems()
+        self.assertTrue(problem.startswith(f"{self.home / 'config.json'} is not valid JSON ("), problem)
+
     def test_thresholds(self):
         cfg = config.load()
         self.assertEqual(config.thresholds(cfg, 200_000), config.Thresholds(soft=100_000, hard=130_000))

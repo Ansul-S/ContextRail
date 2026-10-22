@@ -2,8 +2,9 @@ import json
 import os
 import subprocess
 import sys
+import time
 
-from contextrail import prompts
+from contextrail import handlers, prompts
 from tests.helpers import CR, ROOT, VALID_BODY, TempHome
 
 
@@ -45,6 +46,25 @@ class CliTest(TempHome):
         self.assertIn("Triggers:  handoff at 100,000 tokens, wrap-up at 130,000", result.stdout)
         self.assertIn("Handoff:   saved just now", result.stdout)
 
+    def test_status_points_at_doctor_after_errors(self):
+        self.assertNotIn("Errors:", self.run_cr("status", str(self.repo)).stdout)
+        self.run_cr("stop", stdin=json.dumps({"cwd": 12345, "transcript_path": ["x"]}))  # logs an error
+        self.assertIn("Errors:    1 in the last 24 h. Run /contextrail:doctor", self.run_cr("status", str(self.repo)).stdout)
+
+    def test_hooks_record_a_heartbeat(self):
+        self.at_tokens(10_000)
+        self.run_cr("stop", stdin=json.dumps(self.payload("Stop", last_assistant_message="ok")))
+        self.run_cr("session-start", stdin="not json")
+        beats = json.loads((self.home / "heartbeat.json").read_text())
+        self.assertEqual(sorted(beats), ["SessionStart", "Stop"])
+        self.assertLessEqual(abs(beats["Stop"] - time.time()), 60)
+
+    def test_unwritable_home_never_fails_the_hook(self):
+        self.home.write_text("a file, not a folder")
+        self.at_tokens(102_000)
+        result = self.run_cr("stop", stdin=json.dumps(self.payload("Stop", last_assistant_message="ok")))
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+
     def test_unknown_command_and_help(self):
         self.assertEqual(self.run_cr("nope").returncode, 2)
         self.assertIn("ContextRail", self.run_cr("--help").stdout)
@@ -64,12 +84,20 @@ class PluginFilesTest(TempHome):
 
     def test_hooks_point_at_real_commands(self):
         hooks = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]
-        for groups in hooks.values():
+        for event, groups in hooks.items():
             for group in groups:
                 for hook in group["hooks"]:
                     command = hook["command"]
                     self.assertIn('"${CLAUDE_PLUGIN_ROOT}/contextrail/cr.py"', command)
-                    self.assertIn(command.split()[-1], ("stop", "post-tool", "pre-compact", "session-start"))
+                    self.assertEqual(handlers.HOOKS[command.split()[-1]][0], event)
+        # SessionStart runs for every source; the inject_on setting decides what loads.
+        self.assertNotIn("matcher", hooks["SessionStart"][0])
+
+    def test_commands_run_cr_py(self):
+        # A shell block that exits non-zero stops the slash command before the model sees it.
+        for name, line in (("status", "status"), ("doctor", "doctor --exit-zero")):
+            command = (ROOT / f"commands/{name}.md").read_text()
+            self.assertIn(f'```!\n"${{CLAUDE_PLUGIN_ROOT}}/contextrail/cr.py" {line}\n```', command)
 
     def test_handoff_command_matches_the_hook_prompt(self):
         command = (ROOT / "commands/handoff.md").read_text()

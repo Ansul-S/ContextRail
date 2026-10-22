@@ -4,6 +4,7 @@ object to print, or None to stay silent."""
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import shutil
 import subprocess
@@ -13,12 +14,30 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import __version__, config, facts, handoff, prompts, store
+from .config import tilde
 from .usage import Usage, last_assistant_text, last_usage
 
 Payload = Dict[str, Any]
 Output = Optional[Dict[str, Any]]
 
 WARN_EVERY_TOKENS = 30_000
+HEARTBEAT = "heartbeat.json"
+HEARTBEAT_EVERY = 60
+
+
+def heartbeat(event: str) -> None:
+    """Note when each hook last ran, at most once a minute, for /contextrail:doctor."""
+    path = config.home() / HEARTBEAT
+    beats = store.read_json(path)
+    now = time.time()
+    last = beats.get(event)
+    if isinstance(last, (int, float)) and 0 <= now - last < HEARTBEAT_EVERY:
+        return
+    beats[event] = round(now)
+    try:
+        store.write_atomic(path, json.dumps(beats, indent=2))
+    except OSError:
+        pass
 
 
 def _now_iso() -> str:
@@ -45,12 +64,6 @@ def describe_age(seconds: Optional[float]) -> str:
             count = int(seconds // size)
             return f"{count} {unit}{'' if count == 1 else 's'} ago"
     return "just now"
-
-
-def tilde(path: Path) -> str:
-    home = str(Path.home())
-    text = str(path)
-    return "~" + text[len(home):] if text.startswith(home + os.sep) else text
 
 
 def copy_to_clipboard(text: str) -> bool:
@@ -269,3 +282,12 @@ def on_session_start(payload: Payload) -> Output:
         },
         "systemMessage": f"ContextRail: loaded the handoff saved {age} ({changes}).",
     }
+
+
+# cr.py command -> (hook event, handler)
+HOOKS = {
+    "stop": ("Stop", on_stop),
+    "post-tool": ("PostToolUse", on_post_tool),
+    "pre-compact": ("PreCompact", on_pre_compact),
+    "session-start": ("SessionStart", on_session_start),
+}

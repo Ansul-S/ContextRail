@@ -51,6 +51,7 @@ Commands:
 | --- | --- |
 | `/contextrail:handoff` | Write a handoff now, at any context size. Useful before a break. |
 | `/contextrail:status` | Show context usage, trigger points, the saved handoff, and what changed since it was saved. |
+| `/contextrail:doctor` | Check the setup: Python, the hooks, storage and settings, when each hook last ran, whether usage can be read, and whether the saved handoff would load. |
 
 ## When it triggers, and why
 
@@ -112,6 +113,8 @@ All data stays on your machine, under `~/.contextrail/` (or `CONTEXTRAIL_HOME`).
   config.json         optional per-project settings
 ```
 
+`~/.contextrail/` itself also holds `error.log`, for errors in the hooks, and `heartbeat.json`, which records when each hook last ran.
+
 A project is the git repository root, or the folder itself if it isn't a repository. Sessions started in subfolders share the project's handoff.
 
 ## FAQ
@@ -128,8 +131,14 @@ ContextRail asks at most three times per session, then tells you to run `/contex
 **Does it work alongside other context monitors (such as GSD's)?**
 Yes. ContextRail fires earlier than most warnings, so the handoff usually exists by the time they appear. Some monitors tell the agent not to write handoffs unless asked. ContextRail's request says the user set it up, which counts as asking.
 
+**How does it know whether a check passed?**
+It picks the test, lint or build command out of each shell command, skipping `cd`, variable assignments and heredoc bodies. If the command's exit status belongs to that check, it uses the exit status. If a pipe (`| tail`) or a later command hides it, ContextRail reads the summary line that the tool prints (unittest, pytest, jest, vitest, go, cargo, mypy, ruff and others). If there is no summary line, the check is listed as "ran", not "passed".
+
+**Something seems off.**
+Run `/contextrail:doctor`. It lists each check as ok, warn or FAIL, with what to fix. From a terminal, `python3 /path/to/contextrail/contextrail/cr.py doctor` does the same and exits 1 if a check fails. Errors from the hooks go to `~/.contextrail/error.log`, and `/contextrail:status` mentions them when there were any in the last 24 hours.
+
 **Hooks feel slow.**
-Each hook is one short Python process, usually under 0.1 s, even with transcripts of 60 MB or more. Version-manager shims such as pyenv can add about 0.1 s per call.
+Each hook is one short Python process, usually under 0.1 s, even with transcripts of 60 MB or more. Version-manager shims such as pyenv can add about 0.15 s per call. `/contextrail:doctor` measures it.
 
 **Windows?**
 It should work if `python3` is on your `PATH`. File locking and the clipboard use fallbacks. It is not yet tested in CI.
@@ -148,9 +157,9 @@ Everything is standard-library Python 3.9+, with no dependencies. To try changes
 ```
 .claude-plugin/        plugin and marketplace manifests
 hooks/hooks.json       Stop, PostToolUse, PreCompact and SessionStart hooks
-commands/              /contextrail:handoff and /contextrail:status
-contextrail/cr.py      entry point for hooks and the status command
-contextrail/*.py       usage, facts, handoff, storage, config and prompts
+commands/              /contextrail:handoff, /contextrail:status and /contextrail:doctor
+contextrail/cr.py      entry point for hooks and the status and doctor commands
+contextrail/*.py       usage, facts, handoff, storage, config, prompts, status and doctor
 tests/                 unittest suite with synthetic transcripts
 ```
 

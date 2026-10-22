@@ -1,3 +1,5 @@
+import unittest
+
 from contextrail import facts
 from tests.helpers import TempHome, git, tool_result, tool_use, user, write_transcript
 
@@ -25,26 +27,141 @@ class GitStateTest(TempHome):
 
 
 class ActivityTest(TempHome):
+    def activity(self, *entries):
+        write_transcript(self.transcript, [user(), *entries])
+        return facts.session_activity(str(self.transcript), self.repo)
+
+    def bash(self, tool_id, command, text=None, is_error=False, **args):
+        return [tool_use(tool_id, "Bash", {"command": command, **args}), tool_result(tool_id, is_error, text)]
+
     def test_edits_and_checks(self):
-        write_transcript(self.transcript, [
-            user(),
+        activity = self.activity(
             tool_use("e1", "Edit", {"file_path": str(self.repo / "app.py")}),
-            tool_use("e2", "Write", {"file_path": "/elsewhere/notes.md"}),
+            tool_use("e2", "Write", {"file_path": str(self.repo / "lib.py")}),
             tool_use("e3", "Edit", {"file_path": str(self.repo / "app.py")}),
-            tool_use("b1", "Bash", {"command": "pytest -q tests/"}),
-            tool_result("b1", is_error=True),
-            tool_use("b2", "Bash", {"command": "ls -la"}),
-            tool_result("b2"),
-            tool_use("b3", "Bash", {"command": "pytest -q tests/"}),
-            tool_result("b3"),
+            *self.bash("b1", "pytest -q tests/", is_error=True),
+            *self.bash("b2", "ls -la"),
+            *self.bash("b3", "pytest -q tests/"),
             tool_use("b4", "Bash", {"command": "pnpm build"}),
-        ])
-        activity = facts.session_activity(str(self.transcript), self.repo)
-        self.assertEqual(activity.edited, ["/elsewhere/notes.md", "app.py"])
-        self.assertEqual(activity.checks, [("pytest -q tests/", True), ("pnpm build", None)])
+        )
+        self.assertEqual(activity.edited, ["lib.py", "app.py"])
+        self.assertEqual(activity.checks, [("pytest -q tests/", "passed"), ("pnpm build", "result unknown")])
+
+    def test_heredoc_body_is_not_a_check(self):
+        command = "cat > scripts/ci.sh <<'EOF'\nset -e\npython -m unittest discover\nEOF\nchmod +x scripts/ci.sh"
+        self.assertEqual(self.activity(*self.bash("b1", command)).checks, [])
+
+    def test_failed_summary_behind_a_pipe(self):
+        command = f"cd {self.repo} && python3 -m unittest discover -s tests -t . 2>&1 | tail -3"
+        output = "Ran 12 tests in 0.4s\n\nFAILED (failures=1)"
+        checks = self.activity(*self.bash("b1", command, output)).checks
+        self.assertEqual(checks, [("python3 -m unittest discover -s tests -t .", "failed")])
+
+    def test_pytest_summary(self):
+        for output, expected in (("=== 2 failed, 40 passed in 1.21s ===", "failed"), ("42 passed, 1 skipped in 0.9s", "passed")):
+            with self.subTest(output=output):
+                checks = self.activity(*self.bash("b1", "pytest -q | tail -1", output)).checks
+                self.assertEqual(checks, [("pytest -q", expected)])
+
+    def test_pipe_without_a_summary_only_ran(self):
+        self.assertEqual(self.activity(*self.bash("b1", "pnpm build | tail -5", "done")).checks, [("pnpm build", "ran")])
+
+    def test_output_decides_when_the_exit_status_is_masked(self):
+        checks = self.activity(*self.bash("b1", "pytest -q || true", "1 failed, 2 passed in 0.1s")).checks
+        self.assertEqual(checks, [("pytest -q", "failed")])
+
+    def test_exit_status_decides_without_a_pipe(self):
+        checks = self.activity(
+            *self.bash("b1", "cd sub && npm test", is_error=True),
+            *self.bash("b2", "make lint && echo done", "no summary here"),
+        ).checks
+        self.assertEqual(checks, [("npm test", "failed"), ("make lint", "passed")])
+
+    def test_commands_that_did_not_run_or_finish(self):
+        checks = self.activity(
+            *self.bash("b1", "pytest -q", "Permission to use Bash with command pytest -q has been denied.", is_error=True),
+            *self.bash("b2", "npm run e2e", "Command running in background with ID: b2.", run_in_background=True),
+            tool_use("b3", "Bash", {"command": "cargo test"}),
+        ).checks
+        self.assertEqual(
+            checks, [("pytest -q", "result unknown"), ("npm run e2e", "result unknown"), ("cargo test", "result unknown")]
+        )
+
+    def test_content_blocks_and_long_commands(self):
+        output = [{"type": "text", "text": "Ran 3 tests in 0.1s\n\nOK"}]
+        command = "python3 -m unittest tests/" + "x" * 100 + " 2>&1 | tail -1; python3 -m unittest"
+        [(shown, result)] = self.activity(*self.bash("b1", command, output)).checks
+        self.assertEqual(result, "passed")
+        self.assertEqual(shown, "python3 -m unittest tests/" + "x" * 53 + "… (+1 more)")
+
+    def test_files_outside_the_project_are_counted(self):
+        activity = self.activity(
+            tool_use("e1", "Edit", {"file_path": str(self.repo / "app.py")}),
+            tool_use("e2", "Write", {"file_path": str(self.tmp / "notes.md")}),
+            tool_use("e3", "Edit", {"file_path": str(self.tmp / "notes.md")}),
+            tool_use("e4", "Edit", {"file_path": "/elsewhere/x.py"}),
+        )
+        self.assertEqual((activity.edited, activity.outside), (["app.py"], 2))
 
     def test_missing_transcript(self):
         self.assertEqual(facts.session_activity(str(self.tmp / "nope.jsonl"), self.repo), facts.Activity())
+
+
+class CommandTest(unittest.TestCase):
+    def test_finds_the_check_in_a_command(self):
+        cases = {
+            "cd /repo && CI=1 pnpm --filter web build": "CI=1 pnpm --filter web build",
+            "(cd backend && uv run --with pytest-cov pytest -q)": "uv run --with pytest-cov pytest -q",
+            "if pytest -q; then echo ok; fi": "pytest -q",
+            "# don't skip the tests\npytest -q": "pytest -q",
+            "/usr/bin/python3 -m unittest discover": "/usr/bin/python3 -m unittest discover",
+            "npx -p typescript tsc --noEmit": "npx -p typescript tsc --noEmit",
+            "yarn workspace web test": "yarn workspace web test",
+            "go test ./... | tee log": "go test ./...",
+            "make -C sub test 2>&1": "make -C sub test",
+            "ruff format --check .": "ruff format --check .",
+            "mvn -q clean install": "mvn -q clean install",
+            "git commit -m 'run pytest; then make'": None,
+            "python3 -c 'import unittest'": None,
+            "test -d build || mkdir build": None,
+            "npm ci && npm run dev": None,
+            "ruff format app": None,
+            "make web": None,
+        }
+        for command, expected in cases.items():
+            with self.subTest(command=command):
+                check = facts.find_check(command)
+                self.assertEqual(check.command if check else None, expected)
+
+    def test_when_the_exit_status_is_the_checks(self):
+        cases = {
+            "pytest": True,
+            "cd x && pytest && git status": True,
+            "pytest | tail -3": False,
+            "pytest || true": False,
+            "pytest; echo done": False,
+            "pytest\nls": False,
+        }
+        for command, expected in cases.items():
+            with self.subTest(command=command):
+                self.assertEqual(facts.find_check(command).exit_status, expected)
+        self.assertTrue(facts.find_check("pytest &").detached)
+
+    def test_output_verdict(self):
+        cases = {
+            "Ran 3 tests in 0.1s\n\nOK": "passed",
+            "Ran 3 tests in 0.1s\n\nFAILED (errors=2)": "failed",
+            "ok  \tpkg/a\t0.1s\nFAIL\tpkg/b\t0.2s\nFAIL": "failed",
+            "Tests:       1 failed, 5 passed, 6 total": "failed",
+            "test result: ok. 8 passed; 0 failed; 0 ignored": "passed",
+            "Found 3 errors in 2 files (checked 9 source files)": "failed",
+            "All checks passed!": "passed",
+            "FAILED (failures=1)\nRan 3 tests in 0.1s\n\nOK": None,  # two runs that disagree
+            "built in 2.1s": None,
+        }
+        for output, expected in cases.items():
+            with self.subTest(output=output):
+                self.assertEqual(facts.output_verdict(output), expected)
 
 
 class DriftTest(TempHome):

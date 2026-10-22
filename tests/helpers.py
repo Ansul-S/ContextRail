@@ -74,7 +74,11 @@ def tool_use(tool_id: str, name: str, args: Dict[str, Any], tokens: int = 10_000
     return assistant(tokens, content=[{"type": "tool_use", "id": tool_id, "name": name, "input": args}])
 
 
-def tool_result(tool_id: str, is_error: bool = False, text: str = "output") -> Dict[str, Any]:
+def tool_result(tool_id: str, is_error: bool = False, text: Any = None) -> Dict[str, Any]:
+    """A tool result; text may be a string or a list of content blocks. Bash
+    starts the text of a non-zero exit with "Exit code N"."""
+    if text is None:
+        text = "Exit code 1\nerror" if is_error else "output"
     return {
         "type": "user",
         "isSidechain": False,
@@ -106,15 +110,21 @@ def make_repo(path: Path) -> Path:
 
 
 class TempHome(unittest.TestCase):
-    """Runs each test with its own CONTEXTRAIL_HOME and a fresh git repo."""
+    """Runs each test with its own CONTEXTRAIL_HOME, Claude config folder and a
+    fresh git repo."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name).resolve()
         self.home = self.tmp / "contextrail-home"
+        self.claude = self.tmp / "claude-config"
         self.repo = make_repo(self.tmp / "repo")
         self.transcript = self.tmp / "session.jsonl"
-        env = {"CONTEXTRAIL_HOME": str(self.home), "CONTEXTRAIL_COPY_RESUME_PROMPT": "0"}
+        env = {
+            "CONTEXTRAIL_HOME": str(self.home),
+            "CONTEXTRAIL_COPY_RESUME_PROMPT": "0",
+            "CLAUDE_CONFIG_DIR": str(self.claude),
+        }
         self._env = mock.patch.dict(os.environ, env)  # restores the whole environment on stop
         self._env.start()
         for key in [k for k in os.environ if k.startswith("CONTEXTRAIL_") and k not in env]:

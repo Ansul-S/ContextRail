@@ -3,11 +3,12 @@ per-project config.json, then CONTEXTRAIL_* environment variables."""
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 DEFAULTS: Dict[str, Any] = {
     "enabled": True,
@@ -34,12 +35,22 @@ DEFAULTS: Dict[str, Any] = {
 }
 
 ENV_PREFIX = "CONTEXTRAIL_"
+# Environment variables with the prefix that are not settings.
+ENV_ONLY = {"CONTEXTRAIL_HOME", "CONTEXTRAIL_DISABLE"}
+SESSION_SOURCES = ("startup", "resume", "clear", "compact")
 
 
 def home() -> Path:
     """Where ContextRail keeps its data (CONTEXTRAIL_HOME, default ~/.contextrail)."""
     override = os.environ.get("CONTEXTRAIL_HOME")
     return Path(override).expanduser() if override else Path.home() / ".contextrail"
+
+
+def tilde(path: Path) -> str:
+    """path with the home folder shown as ~."""
+    home_dir = str(Path.home())
+    text = str(path)
+    return "~" + text[len(home_dir):] if text.startswith(home_dir + os.sep) else text
 
 
 def _coerce(key: str, value: Any) -> Any:
@@ -109,6 +120,54 @@ def load(project_dir: Optional[Path] = None) -> Dict[str, Any]:
     if os.environ.get("CONTEXTRAIL_DISABLE", "").strip().lower() in ("1", "true", "yes"):
         cfg["enabled"] = False
     return cfg
+
+
+def _invalid(updates: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """(key, problem) for each setting that load() ignores or can't use."""
+    found = []
+    for key, value in updates.items():
+        if key not in DEFAULTS:
+            close = difflib.get_close_matches(key, DEFAULTS, n=1)
+            found.append((key, "is not a setting" + (f" (did you mean '{close[0]}'?)" if close else "")))
+            continue
+        try:
+            coerced = _coerce(key, value)
+        except (TypeError, ValueError):
+            found.append((key, f"has an invalid value, {json.dumps(value)}"))
+            continue
+        if key == "inject_on":
+            unknown = [source for source in coerced if source not in SESSION_SOURCES]
+            if unknown:
+                found.append((key, f"has unknown sources {unknown}; use {', '.join(SESSION_SOURCES)}"))
+    return found
+
+
+def problems(project_dir: Optional[Path] = None) -> List[str]:
+    """What load() ignores: unreadable config files, unknown keys and invalid values."""
+    found = []
+    paths = [home() / "config.json"] + ([project_dir / "config.json"] if project_dir is not None else [])
+    for path in paths:
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except OSError as error:
+            found.append(f"{tilde(path)} can't be read ({error.strerror or error})")
+            continue
+        except ValueError as error:
+            found.append(f"{tilde(path)} is not valid JSON ({error})")
+            continue
+        if not isinstance(data, dict):
+            found.append(f"{tilde(path)} must hold a JSON object")
+            continue
+        found += [f"{tilde(path)}: '{key}' {problem}" for key, problem in _invalid(data)]
+    env = {
+        name[len(ENV_PREFIX):].lower(): value
+        for name, value in os.environ.items()
+        if name.startswith(ENV_PREFIX) and name not in ENV_ONLY
+    }
+    found += [f"{ENV_PREFIX}{key.upper()} {problem}" for key, problem in _invalid(env)]
+    return found
 
 
 @dataclass(frozen=True)

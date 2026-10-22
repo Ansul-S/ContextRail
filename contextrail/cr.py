@@ -2,7 +2,7 @@
 """ContextRail: automatic session handoff for Claude Code.
 
 Hooks (JSON payload on stdin):  cr.py stop | post-tool | pre-compact | session-start
-Manual:                         cr.py status [DIR]
+Manual:                         cr.py status [DIR] | doctor [DIR] [--exit-zero]
 """
 
 import json
@@ -14,14 +14,8 @@ from pathlib import Path
 # Import the package from the plugin root, not modules from this folder.
 sys.path[0] = str(Path(__file__).resolve().parent.parent)
 
-from contextrail import __version__, config, handlers, status  # noqa: E402
+from contextrail import __version__, config, doctor, handlers, status  # noqa: E402
 
-HANDLERS = {
-    "stop": handlers.on_stop,
-    "post-tool": handlers.on_post_tool,
-    "pre-compact": handlers.on_pre_compact,
-    "session-start": handlers.on_session_start,
-}
 ERROR_LOG_LIMIT = 256 * 1024
 
 
@@ -48,11 +42,14 @@ def main(argv):
         return 0
     if argv[1] == "status":
         return status.main(argv[2:])
-    handler = HANDLERS.get(argv[1])
-    if handler is None:
+    if argv[1] == "doctor":
+        return doctor.main(argv[2:])
+    if argv[1] not in handlers.HOOKS:
         print(f"cr.py: unknown command {argv[1]!r}", file=sys.stderr)
         return 2
+    event, handler = handlers.HOOKS[argv[1]]
     try:
+        handlers.heartbeat(event)
         payload = json.loads(sys.stdin.read() or "{}")
         output = handler(payload) if isinstance(payload, dict) else None
     except Exception:
