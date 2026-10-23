@@ -9,7 +9,7 @@
       "name": "contextrail",
       "source": "./",
       "description": "Saves a handoff before long Claude Code sessions lose quality, and loads it into the next session.",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "category": "productivity",
       "homepage": "https://github.com/Ansul-S/ContextRail"
     },
@@ -17,7 +17,7 @@
       "name": "contextrail-continue",
       "source": "./mods/contextrail-continue",
       "description": "Optional companion to ContextRail: after it saves the final handoff, asks whether to start a new session from it, and clears and continues on yes. Checkpoint handoffs before that get no question. In Lightning Mode it starts the new session after a 10-second countdown. Needs a Claude Code version with mods (early access).",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "category": "productivity",
       "homepage": "https://github.com/Ansul-S/ContextRail"
     }

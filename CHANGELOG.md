@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.6.0 (2026-10-23)
+
+ContextRail stays out of the way of your decisions and of running work: a question the agent asks you comes before the handoff request until the wrap-up point and is never buried under a countdown, and work that finishes after the final handoff still makes it into that handoff. The README is rewritten for new users, with the details moved to [docs/how-it-works.md](docs/how-it-works.md).
+
+### Upgrading
+
+- Update both plugins, then restart Claude Code. `/clear` doesn't reload plugin hooks.
+- No settings changed.
+
+### Questions and decisions
+
+- **No handoff request over a question:** when the agent ends its turn with a question to you, ContextRail no longer interrupts that stop with a request. It says once that the request waits for your answer, and asks at the stop after it. From the wrap-up point on it asks anyway. Before, the request landed under the question, Claude Code showed it as "Stop hook error occurred", and the agent repeated the question as plain text after the handoff.
+- **No plain-text repeat:** the request no longer tells the agent to repeat a pending question after the handoff block. A question that is still open goes under the handoff's Open questions.
+- **No offer or countdown over a question:** at a stop where the agent waits for your answer, `contextrail-continue` holds its offer, and in Lightning Mode its countdown. Answering carries on in the current session.
+- Claude Code's own question picker (AskUserQuestion) works with ContextRail on, and ContextRail doesn't touch it or the permission prompts. Checked in real sessions: in a normal session, after a checkpoint request, and in a new session started from a handoff.
+
+### Background work
+
+- **The final handoff gets the results:** when the final handoff is saved while background tasks are still running, ContextRail asks for it again once they finish, so the next session starts with their results. `contextrail-continue` holds its offer until then, as before, and never starts a new session over running work.
+- **Watchers no longer hold a handoff:** Claude Code lists some background tasks that never end and produce nothing for a handoff: artifact live updates and Monitor streams (type `monitor`), and its own chores (`dream`, `auto-mode scan`, `memory import`). ContextRail waited for them until the wrap-up point, and `contextrail-continue` held its question and the Lightning countdown for good. An artifact watch carried over by `/clear` kept a Lightning session from ever switching. Both now wait only for work: shell commands, subagents, workflows, MCP tasks, teammates and cloud sessions.
+- **Status line:** `◷ waiting for background tasks` no longer shows after a save when nothing is running.
+
+### Measuring
+
+- **The reply that ended the turn:** Claude Code writes it to the transcript around the time the Stop hook runs: before it, a moment after it starts, or only after it returns. Within 30k tokens of the next request point, the Stop hook now waits up to 0.5 s for it, so the request comes at the right turn more often. Elsewhere it doesn't wait, so turns end as fast as before. When the reply is written only after the hook, the request can still come one turn late.
+
+### Other
+
+- `/contextrail:doctor` warns when `CONTEXTRAIL_HOME` is a relative path: each hook would read it from its own folder.
+- The README says that Claude Code labels a request "Stop hook error occurred" and keeps its note behind ctrl+o, and that `/contextrail:status` shows the same points.
+
 ## 0.5.0 (2026-10-23)
 
 ContextRail stays out of Claude Code's way: handoffs load whole, scripted runs are left alone, handoffs before the wrap-up point are checkpoints you keep working through, and the companion plugin asks before it starts a new session. Your own trigger points are checked and explained. Lightning Mode, if you turn it on, starts a new session on its own at a context size you set.
