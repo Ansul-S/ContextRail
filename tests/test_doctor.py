@@ -188,6 +188,14 @@ class DoctorTest(TempHome):
         self.home.write_text("a file, not a folder")
         self.assertEqual(self.results()["Storage"].status, "fail")
 
+    def test_a_relative_home_warns(self):
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(self.tmp)
+        with mock.patch.dict(os.environ, {"CONTEXTRAIL_HOME": "relative-home"}):
+            storage = doctor.check_storage()
+        self.assertEqual(storage.status, "warn")
+        self.assertIn("CONTEXTRAIL_HOME is a relative path (relative-home)", storage.detail)
+
 
 class PythonCheckTest(TempHome):
     def test_reports_version_and_start_up(self):

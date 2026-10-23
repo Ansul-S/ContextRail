@@ -141,6 +141,13 @@ def check_storage() -> Result:
         probe.unlink()
     except OSError as error:
         return Result("fail", "Storage", f"can't write to {tilde(home)}: {error.strerror or error}")
+    if not home.is_absolute():
+        # Each hook runs in the session's folder, so a relative path lands in a different place per project.
+        return Result(
+            "warn", "Storage",
+            f"CONTEXTRAIL_HOME is a relative path ({home}): each hook reads it from the folder it runs in, "
+            "so handoffs and state land in more than one place. Set it to an absolute path.",
+        )
     return Result("ok", "Storage", f"{tilde(home)} is writable")
 
 
