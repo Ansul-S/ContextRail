@@ -137,6 +137,17 @@ class PluginFilesTest(TempHome):
         prefix = register.split("const REQUEST = '")[1].split("'")[0]
         self.assertTrue(prompts.request("x tokens", 8_000, refresh=False).startswith(prefix))
         self.assertTrue(prompts.request("x tokens", 8_000, refresh=True).startswith(prefix))
+        self.assertTrue(prompts.request("x tokens", 8_000, refresh=False, kind="final", finished=True).startswith(prefix))
+
+    def test_mod_skips_the_same_background_task_types(self):
+        register = (ROOT / "mods/contextrail-continue/hooks/register.tsx").read_text()
+        listed = register.split("const PASSIVE = [")[1].split("]")[0]
+        self.assertEqual(tuple(part.strip().strip("'") for part in listed.split(",")), handlers.PASSIVE)
+
+    def test_mod_holds_its_offer_on_the_same_question_test(self):
+        register = (ROOT / "mods/contextrail-continue/hooks/register.tsx").read_text()
+        pattern = register.split("const QUESTION_END = /")[1].split("/\n")[0]
+        self.assertEqual(pattern, handlers.QUESTION_END_RE.pattern)
 
     def test_hooks_point_at_real_commands(self):
         hooks = json.loads((ROOT / "hooks/hooks.json").read_text())["hooks"]

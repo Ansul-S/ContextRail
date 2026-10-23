@@ -13,6 +13,12 @@ const BLOCK = /<contextrail-handoff>\s*([\s\S]*?)\s*<\/contextrail-handoff>/g
 // The same with each tag on a line of its own, so a tag quoted inside the handoff doesn't end it.
 const LINE_BLOCK = /^[ \t]*<contextrail-handoff>[ \t\r]*\n([\s\S]*?)\n[ \t]*<\/contextrail-handoff>[ \t\r]*$/gm
 const HEADING = /^##[ \t]+(.+?)[ \t#]*$/m
+// A reply that waits for the person's answer: its last line ends with a question mark, maybe inside
+// closing markdown, quotes or brackets (handlers.QUESTION_END_RE in ContextRail; a test keeps them in step).
+const QUESTION_END = /\?[*_`'"’”)\]\s]*$/
+// Background task types that are watchers or Claude Code's own chores, not work: they can run for good,
+// so they hold nothing (handlers.PASSIVE in ContextRail; a test keeps them in step).
+const PASSIVE = ['monitor', 'dream', 'auto-mode scan', 'memory import']
 const FALLBACK = 'Continue where the last session stopped. Start with the handoff\'s "Verify first" commands.'
 
 const PANE = 'contextrail-continue'
@@ -46,6 +52,12 @@ function handoffOf(text: string | undefined): string | undefined {
   const onLines = [...(text ?? '').matchAll(LINE_BLOCK)]
   const blocks = onLines.length > 0 ? onLines : [...(text ?? '').matchAll(BLOCK)]
   return blocks.at(-1)?.[1]?.trim()
+}
+
+/** Whether the agent ended its turn with a question to the person. */
+function waitsForAnswer(text: string | undefined): boolean {
+  const lines = (text ?? '').split('\n').filter((line) => line.trim() !== '')
+  return lines.length > 0 && QUESTION_END.test(lines[lines.length - 1] ?? '')
 }
 
 /** The handoff's `## Resume prompt`, read as ContextRail reads it. */
@@ -347,11 +359,16 @@ export const register: Register = (on, options) => {
       return result
     }
     // Background work still runs, and its results are still to come and be shown in this session.
-    const pending = (e.background_tasks?.length ?? 0) + (e.session_crons?.length ?? 0)
+    const working = (e.background_tasks ?? []).filter((task) => !PASSIVE.includes(task.type))
+    const pending = working.length + (e.session_crons?.length ?? 0)
     if (pending > 0) {
       if (isSaved) {
         $.ui.toast(HELD)
       }
+      return result
+    }
+    // The agent waits for the person's answer: no question or countdown over it. Answering carries on here.
+    if (waitsForAnswer(e.last_assistant_message)) {
       return result
     }
     await withdraw($, state)
