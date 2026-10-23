@@ -32,12 +32,14 @@ ContextRail does nothing in sessions nobody is watching, so a scripted end-to-en
 
 ## The mod
 
-`mods/contextrail-continue/` is an optional plugin of a newer kind, a TypeScript hooks module (a mod), that asks whether to start a new session after a handoff, and clears and continues on yes. It recognises ContextRail's handoff request by its opening words, and a checkpoint request by `prompts.CHECKPOINT`, after which it offers no new session; Python tests keep both in step. For Lightning Mode it reads `lightning_tokens` itself, the way `contextrail/config.py` does: the environment variable when it holds a usable value, else `config.json` under `CONTEXTRAIL_HOME`. A change to how `config.py` reads numbers needs the same change in `tokensOf` in `register.tsx`, and the mod's tests list the values both must agree on. Check it with:
+`mods/contextrail-continue/` is an optional plugin of a newer kind, a TypeScript hooks module (a mod), that asks whether to start a new session after a handoff, and clears and continues on yes. It recognises ContextRail's handoff request by its opening words, and a checkpoint request by `prompts.CHECKPOINT`, after which it offers no new session. It holds its offer at a stop where the agent waits for an answer, on the same test as the Stop hook (`QUESTION_END` in `register.tsx`, `handlers.QUESTION_END_RE` in Python), and it skips the same background task types as the Stop hook while it waits for running work (`PASSIVE` in both). Python tests keep all of these in step. For Lightning Mode it reads `lightning_tokens` itself, the way `contextrail/config.py` does: the environment variable when it holds a usable value, else `config.json` under `CONTEXTRAIL_HOME`. A change to how `config.py` reads numbers needs the same change in `tokensOf` in `register.tsx`, and the mod's tests list the values both must agree on. Check it with:
 
 ```
 claude plugin validate mods/contextrail-continue
 claude plugin test mods/contextrail-continue
 ```
+
+With the mod's type files in `.claude-plugin/types/` (git-ignored, written by Claude Code's mod tooling), `npx -y -p typescript tsc -p mods/contextrail-continue` type-checks it.
 
 ## Changing the prompt
 
