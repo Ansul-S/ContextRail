@@ -1,4 +1,7 @@
+import json
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -169,6 +172,63 @@ class LastAssistantTextTest(unittest.TestCase):
                 assistant(10, content=[{"type": "text", "text": "side"}], sidechain=True),
             ])
             self.assertEqual(usage.last_assistant_text(str(path)), "part one\npart two")
+
+
+def append_later(path: Path, entry: dict, seconds: float) -> threading.Thread:
+    """Append a transcript line after a delay, as Claude Code writes the turn's last reply
+    a moment after the Stop hook starts."""
+    def write():
+        time.sleep(seconds)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    thread = threading.Thread(target=write)
+    thread.start()
+    return thread
+
+
+class AwaitReplyTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "t.jsonl"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_returns_at_once_when_the_reply_is_there(self):
+        write_transcript(self.path, [user(), assistant(10, content=[{"type": "text", "text": "All done."}])])
+        began = time.monotonic()
+        self.assertTrue(usage.await_reply(str(self.path), "All done."))
+        self.assertLess(time.monotonic() - began, 0.5)
+
+    def test_ignores_whitespace_and_how_blocks_are_joined(self):
+        write_transcript(self.path, [
+            user(),
+            assistant(10, content=[{"type": "text", "text": "First part."}], message_id="m1"),
+            assistant(10, content=[{"type": "text", "text": "Second  part."}], message_id="m1"),
+        ])
+        self.assertTrue(usage.await_reply(str(self.path), "First part.\n\nSecond part.", timeout=0))
+
+    def test_waits_for_a_reply_written_late(self):
+        write_transcript(self.path, [user(), assistant(90_000, content=[{"type": "text", "text": "Reading the files."}])])
+        late = append_later(self.path, assistant(110_000, content=[{"type": "text", "text": "The files are updated."}]), 0.15)
+        try:
+            began = time.monotonic()
+            self.assertTrue(usage.await_reply(str(self.path), "The files are updated.", timeout=2))
+            self.assertGreaterEqual(time.monotonic() - began, 0.1)
+        finally:
+            late.join()
+        self.assertEqual(usage.last_usage(str(self.path)).tokens, 110_000)
+
+    def test_gives_up_after_the_wait(self):
+        write_transcript(self.path, [user(), assistant(10, content=[{"type": "text", "text": "Something else."}])])
+        began = time.monotonic()
+        self.assertFalse(usage.await_reply(str(self.path), "The reply that never comes.", timeout=0.1))
+        self.assertGreaterEqual(time.monotonic() - began, 0.1)
+
+    def test_nothing_to_compare(self):
+        write_transcript(self.path, [user(), assistant(10)])
+        for transcript, message in ((str(self.path), ""), (str(self.path), " \n"), (None, "ok"), ("", "ok")):
+            self.assertFalse(usage.await_reply(transcript, message, timeout=5))
 
 
 if __name__ == "__main__":

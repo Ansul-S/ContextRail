@@ -84,6 +84,10 @@ def session(state: Dict[str, Any], session_id: str) -> Dict[str, Any]:
     # "checkpoint" or "final": the kind of the latest request, and of the handoff saved for it.
     entry.setdefault("asked_kind", None)
     entry.setdefault("saved_kind", None)
+    # The final handoff was saved while background tasks ran: ask for it again once they finish.
+    entry.setdefault("saved_running", False)
+    # The request waits for the user's answer to the agent's question, and said so once.
+    entry.setdefault("question_notice", False)
     return entry
 
 

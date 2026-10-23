@@ -28,6 +28,12 @@ SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 # Transcript attachments in which Claude Code lists skills, agents, MCP instructions and deferred tools.
 LISTINGS = ("skill_listing", "agent_listing_delta", "mcp_instructions_delta", "deferred_tools_delta")
 _LISTING_BYTES = tuple(f'"{name}"'.encode() for name in LISTINGS)
+# Claude Code writes the reply that ends a turn to the transcript around the time the Stop hook
+# runs: before it, about 0.06 s after it starts, or only once it returns (all measured, 2.1.309).
+# Read before it, the context is the one of the reply before.
+REPLY_WAIT = 0.5
+REPLY_POLL = 0.02
+REPLY_TAIL = 500
 
 
 @dataclass(frozen=True)
@@ -252,3 +258,25 @@ def last_assistant_text(transcript_path: Optional[str]) -> str:
     except OSError:
         return ""
     return "\n".join(reversed(texts))
+
+
+def _squash(text: str) -> str:
+    return "".join(text.split())
+
+
+def await_reply(transcript_path: Optional[str], message: Optional[str], timeout: Optional[float] = None) -> bool:
+    """Wait until the transcript's latest main-thread reply is `message`, the Stop payload's
+    last_assistant_message, so the context read next is the one at the end of the turn.
+
+    Whitespace is left out of the comparison, and only the end of the message is compared.
+    True once the reply is there; False with nothing to compare, or after the wait."""
+    tail = _squash(message or "")[-REPLY_TAIL:]
+    if not transcript_path or not tail:
+        return False
+    deadline = time.monotonic() + (REPLY_WAIT if timeout is None else timeout)
+    while True:
+        if _squash(last_assistant_text(transcript_path)).endswith(tail):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(REPLY_POLL)

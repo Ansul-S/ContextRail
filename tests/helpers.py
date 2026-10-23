@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest import mock
 
+from contextrail import usage
+
 ROOT = Path(__file__).resolve().parent.parent
 CR = ROOT / "contextrail" / "cr.py"
 
@@ -146,11 +148,15 @@ class TempHome(unittest.TestCase):
         }
         self._env = mock.patch.dict(os.environ, env)  # restores the whole environment on stop
         self._env.start()
+        # Most tests stop with a reply their transcript doesn't hold: don't wait for it to be written.
+        self._wait = mock.patch.object(usage, "REPLY_WAIT", 0.0)
+        self._wait.start()
         for key in [k for k in os.environ if k.startswith("CONTEXTRAIL_") and k not in env]:
             del os.environ[key]
         os.environ.pop("CLAUDE_CODE_SESSION_ATTENDED", None)  # set when the tests run inside Claude Code
 
     def tearDown(self) -> None:
+        self._wait.stop()
         self._env.stop()
         self._tmp.cleanup()
 

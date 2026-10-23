@@ -1,9 +1,11 @@
 import json
 import os
+import time
 from unittest import mock
 
-from contextrail import handlers, handoff, prompts, store
+from contextrail import handlers, handoff, prompts, store, usage
 from tests.helpers import START, VALID_BODY, TempHome, assistant, git, tool_result, tool_use, user, write_transcript
+from tests.test_usage import append_later
 
 
 def block_message(body=VALID_BODY):
@@ -35,6 +37,29 @@ class StopTest(TempHome):
         # Before the hard point the handoff is a checkpoint: no new session is offered after it.
         self.assertIn(prompts.CHECKPOINT, out["reason"])
         self.assertIn("asking for a checkpoint handoff. Work goes on after it", out["systemMessage"])
+
+    def test_measures_the_reply_that_ended_the_turn(self):
+        # Claude Code writes the turn's last reply to the transcript a moment after the Stop hook starts.
+        last = assistant(110_000, content=[{"type": "text", "text": "The three files are updated."}])
+        write_transcript(self.transcript, [user(), assistant(START), assistant(90_000)])
+        self.assertIsNone(self.stop(last_assistant_message="The three files are updated."))  # read at once: 90,000
+        late = append_later(self.transcript, last, 0.15)
+        try:
+            with mock.patch.object(usage, "REPLY_WAIT", 2.0):
+                out = self.stop(last_assistant_message="The three files are updated.")
+        finally:
+            late.join()
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("110,000 tokens of context", out["reason"])
+
+    def test_waits_for_the_reply_only_near_the_next_request(self):
+        with mock.patch.object(usage, "REPLY_WAIT", 0.3):
+            # The next request is at 100,000: the 50% cap of the assumed 200k window.
+            for tokens, waits in ((30_000, False), (69_999, False), (70_000, True), (99_999, True), (100_000, False)):
+                write_transcript(self.transcript, [user(), assistant(START), assistant(tokens)])
+                began = time.monotonic()
+                self.stop(last_assistant_message="A reply the transcript never gets.")
+                self.assertEqual(time.monotonic() - began >= 0.3, waits, tokens)
 
     def test_token_cap_applies_to_large_windows(self):
         self.at_tokens(102_000, model="claude-opus-5-5[1m]")
@@ -272,6 +297,71 @@ class StopTest(TempHome):
         self.assertEqual(handlers._in_flight("not a list"), [])
         no_status = {"type": "subagent", "description": "review"}
         self.assertEqual(handlers._in_flight([dict(TASK, status="Pending"), no_status]), [dict(TASK, status="Pending"), no_status])
+
+    def test_asks_again_once_tasks_that_ran_at_the_final_handoff_finish(self):
+        self.at_tokens(131_000)
+        self.assertEqual(self.stop(last_assistant_message="ok", background_tasks=[TASK])["decision"], "block")
+        self.assertIn("handoff saved", self.stop(last_assistant_message=block_message(), background_tasks=[TASK])["systemMessage"])
+        self.assertTrue(store.load_state(self.project())["sessions"]["session-1"]["saved_running"])
+        self.assertIsNone(self.stop(last_assistant_message="Still running.", background_tasks=[TASK]))
+        # The task finishing wakes the session: the agent shows the results, and that stop asks again.
+        out = self.stop(last_assistant_message="pytest -q passed: 12 tests.", background_tasks=[])
+        self.assertEqual(out["decision"], "block")
+        self.assertTrue(out["reason"].startswith("ContextRail: this session is at"))  # the mod's request prefix
+        self.assertIn("have finished: write it again with their results", out["reason"])
+        self.assertNotIn(prompts.CHECKPOINT, out["reason"])
+        self.assertIn("asking for the handoff again with their results", out["systemMessage"])
+        self.assertIn("handoff saved", self.stop(last_assistant_message=block_message(), background_tasks=[])["systemMessage"])
+        entry = store.load_state(self.project())["sessions"]["session-1"]
+        self.assertFalse(entry["saved_running"])
+        self.assertEqual(entry["saved_kind"], "final")
+        self.assertIsNone(self.stop(last_assistant_message="ok", background_tasks=[]))
+
+    def test_no_second_request_for_a_handoff_nobody_asked_for(self):
+        self.at_tokens(20_000)
+        self.stop(last_assistant_message=block_message(), background_tasks=[TASK])
+        self.assertFalse(store.load_state(self.project())["sessions"]["session-1"]["saved_running"])
+        self.assertIsNone(self.stop(last_assistant_message="pytest -q passed.", background_tasks=[]))
+
+    def test_a_question_to_the_user_holds_the_request(self):
+        self.at_tokens(102_000)
+        out = self.stop(last_assistant_message="The limiter is in.\n\nShould 429s carry a `Retry-After` header?")
+        self.assertNotIn("decision", out)
+        self.assertEqual(out["systemMessage"], (
+            "ContextRail: context is at 102,000 tokens; the handoff request waits until you have answered "
+            "the question above."
+        ))
+        self.assertIsNone(self.stop(last_assistant_message="Which do you want: **(a)** or **(b)?**"))
+        # The answer is in; the stop after it asks, and holding used no attempt.
+        out = self.stop(last_assistant_message="Added the header; pytest -q passed.")
+        self.assertEqual(out["decision"], "block")
+        self.assertEqual(store.load_state(self.project())["sessions"]["session-1"]["attempts"], 1)
+        self.assertFalse(store.load_state(self.project())["sessions"]["session-1"]["question_notice"])
+
+    def test_a_question_holds_the_request_only_until_the_hard_limit(self):
+        self.at_tokens(131_000)
+        out = self.stop(last_assistant_message="Should I keep going?")
+        self.assertEqual(out["decision"], "block")
+        self.assertNotIn("repeat that question", out["reason"])
+
+    def test_waits_for_answer(self):
+        for text in ("Which do you want?", "Done.\n\n**Should I go on?**", "Pick one (a or b?)", "Ready? \n\n",
+                     "Shall I run `make test`?`", "He asked: “Is it safe?”"):
+            self.assertTrue(handlers.waits_for_answer(text), text)
+        for text in ("Done.", "", None, "Is it safe? Yes: all 12 tests pass.", "Run it?\n\n```\nmake test\n```",
+                     "Which one? I picked (a)."):
+            self.assertFalse(handlers.waits_for_answer(text), text)
+
+    def test_watchers_and_housekeeping_hold_nothing(self):
+        # What held a Lightning handoff on 23 Oct: an artifact watch carried over by /clear, which never ends.
+        watch = {"id": "w1", "type": "monitor", "status": "running",
+                 "description": "live updates for artifact https://claude.ai/artifact/HjZTq9WgokwzJSCLS6J4 (watching)"}
+        chores = [dict(watch, type=kind, description=kind) for kind in ("dream", "auto-mode scan", "memory import")]
+        self.at_tokens(102_000)
+        out = self.stop(last_assistant_message="ok", background_tasks=[watch, *chores])
+        self.assertEqual(out["decision"], "block")
+        self.assertNotIn("live updates", out["reason"] + out["systemMessage"])
+        self.assertEqual(handlers._in_flight([watch, TASK, *chores]), [TASK])
 
     def test_waiting_notice_lists_three_tasks(self):
         tasks = [{"type": "subagent"}] + [dict(TASK, description=f"job {i} " + "x" * 80) for i in range(4)]

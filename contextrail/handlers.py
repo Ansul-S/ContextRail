@@ -6,6 +6,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -15,24 +16,34 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import __version__, config, facts, handoff, prompts, store
 from .config import tilde
-from .usage import Usage, last_assistant_text, last_usage, session_start
+from .usage import Usage, await_reply, last_assistant_text, last_usage, session_start
 
 Payload = Dict[str, Any]
 Output = Optional[Dict[str, Any]]
 
 WARN_EVERY_TOKENS = 30_000
+# The reply that ends a turn can add this much to the context read from the transcript before it
+# is written (usage.await_reply): closer than this below the next request, the Stop hook waits for it.
+REPLY_MARGIN = 30_000
 # Claude Code stops a SessionEnd hook after about 1.5 s (measured; the variable
 # below changes it). A checkpoint that can't be written well within that is skipped.
 SESSION_END_SECONDS = 1.5
 SESSION_END_MARGIN = 0.6
 # Stop payloads list in-flight background work; a task without a status counts too.
 IN_FLIGHT = ("running", "pending")
+# Task types (Claude Code's labels) that are watchers or its own chores, not work whose results belong
+# in a handoff: artifact live updates and Monitor streams are "monitor". They can run for good, so
+# nothing waits for them. mods/contextrail-continue skips the same types; a test keeps them in step.
+PASSIVE = ("monitor", "dream", "auto-mode scan", "memory import")
 MAX_TASK_CHARS = 60
 HEARTBEAT = "heartbeat.json"
 HEARTBEAT_EVERY = 60
 # Claude Code moves hook context over 10,000 characters (UTF-16 code units, measured) to a file
 # and shows the model a 2 KB preview, so a longer handoff is loaded shortened. Stay a little under.
 MAX_CONTEXT = 9_800
+# A reply that waits for the user's answer: its last line ends with a question mark, maybe inside
+# closing markdown, quotes or brackets. mods/contextrail-continue holds its offer on the same test.
+QUESTION_END_RE = re.compile(r"""\?[*_`'"’”)\]\s]*$""")
 
 
 def heartbeat(event: str) -> None:
@@ -48,6 +59,12 @@ def heartbeat(event: str) -> None:
         store.write_atomic(path, json.dumps(beats, indent=2))
     except OSError:
         pass
+
+
+def waits_for_answer(message: Optional[str]) -> bool:
+    """Whether the agent ended its turn with a question to the user."""
+    lines = [line for line in (message or "").splitlines() if line.strip()]
+    return bool(lines) and QUESTION_END_RE.search(lines[-1]) is not None
 
 
 def unattended(payload: Payload) -> bool:
@@ -177,7 +194,7 @@ def on_stop(payload: Payload) -> Output:
         if body is not None:
             output = _receive(payload, root, project, cfg, entry, body)
         else:
-            output = _maybe_request(payload, cfg, entry)
+            output = _maybe_request(payload, cfg, entry, message)
         store.save_state(project, state)
     return output
 
@@ -200,12 +217,15 @@ def _receive(
     notes = [f"Saved with problems: {'; '.join(issues)}."] if issues else []
     resume = _save(project, root, cfg, payload, usage, recorded, body, notes)
     limits = config.thresholds(cfg, usage.window, _start(entry, payload)) if usage else None
-    kind = entry["asked_kind"]
+    asked = entry["asked_kind"]
+    kind = asked
     if kind is None:  # a handoff nobody asked for counts as final from the hard point on
         kind = "final" if limits and usage and usage.tokens >= limits.hard else "checkpoint"
     entry.update(
         attempts=0, retries=0, saved_tokens=usage.tokens if usage else 0, warned_tokens=None, gave_up=False,
-        asked_kind=None, saved_kind=kind,
+        asked_kind=None, saved_kind=kind, question_notice=False, deferred_notice=False,
+        # The next session starts from a requested final handoff: once these tasks finish, ask for it again.
+        saved_running=asked == "final" and bool(_in_flight(payload.get("background_tasks"))),
     )
     if config.splits(cfg) and kind == "checkpoint":
         later = f" at {limits.hard:,} tokens" if limits else " at the wrap-up point"
@@ -225,23 +245,34 @@ def _receive(
     return {"systemMessage": message}
 
 
-def _maybe_request(payload: Payload, cfg: Dict[str, Any], entry: Dict[str, Any]) -> Output:
+def _maybe_request(payload: Payload, cfg: Dict[str, Any], entry: Dict[str, Any], message: str) -> Output:
     if payload.get("stop_hook_active"):
         return None  # never chain requests; the next turn will ask again
-    usage = last_usage(payload.get("transcript_path"), cfg["window_tokens"])
+    transcript = payload.get("transcript_path")
+    usage = last_usage(transcript, cfg["window_tokens"])
     if usage is None:
         return None
     start = _start(entry, payload)
     limits = config.thresholds(cfg, usage.window, start)
-    if usage.tokens < limits.soft:
-        return None
     split = config.splits(cfg)
-    kind = "checkpoint" if split and usage.tokens < limits.hard else "final"
+    running = _in_flight(payload.get("background_tasks"))
     saved = entry["saved_tokens"]
-    # Past the hard point, a checkpoint saved since doesn't stand in for the final handoff.
-    final_due = split and kind == "final" and entry["saved_kind"] == "checkpoint"
-    if saved is not None and usage.tokens < saved + cfg["refresh_tokens"] and not final_due:
-        return None
+    due = config.next_request(cfg, limits, saved, entry["saved_kind"])
+    if due - REPLY_MARGIN <= usage.tokens < due and await_reply(transcript, message):
+        usage = last_usage(transcript, cfg["window_tokens"]) or usage
+    # The final handoff was saved while background tasks ran; now they have finished, so the
+    # next session gets their results. contextrail-continue holds its offer until then.
+    finished = bool(entry["saved_running"]) and not running
+    if finished:
+        kind = "final"
+    else:
+        if usage.tokens < limits.soft:
+            return None
+        kind = "checkpoint" if split and usage.tokens < limits.hard else "final"
+        # Past the hard point, a checkpoint saved since doesn't stand in for the final handoff.
+        final_due = split and kind == "final" and entry["saved_kind"] == "checkpoint"
+        if saved is not None and usage.tokens < saved + cfg["refresh_tokens"] and not final_due:
+            return None
     if entry["attempts"] >= cfg["max_attempts"]:
         if entry["gave_up"]:
             return None
@@ -252,7 +283,6 @@ def _maybe_request(payload: Payload, cfg: Dict[str, Any], entry: Dict[str, Any])
                 "Run /contextrail:handoff when you are ready."
             )
         }
-    running = _in_flight(payload.get("background_tasks"))
     why = config.explain(cfg, limits, usage.window, usage.window_source, start)
     if running and usage.tokens < limits.hard:
         # Their results would change what the handoff says, and finishing wakes the session,
@@ -261,21 +291,44 @@ def _maybe_request(payload: Payload, cfg: Dict[str, Any], entry: Dict[str, Any])
             return None
         entry["deferred_notice"] = True
         return {"systemMessage": "\n".join([_waiting(running, limits.hard), *why])}
+    if waits_for_answer(message) and usage.tokens < limits.hard:
+        # A request now would put a handoff over the question, and in Lightning Mode a new session;
+        # the stop after the answer asks. The hard limit caps the wait.
+        if entry["question_notice"]:
+            return None
+        entry["question_notice"] = True
+        return {
+            "systemMessage": (
+                f"ContextRail: context is at {usage.tokens:,} tokens; the handoff request waits until "
+                "you have answered the question above."
+            )
+        }
     entry["attempts"] += 1
     entry["retries"] = 0
     entry["asked_kind"] = kind
+    entry.update(saved_running=False, question_notice=False, deferred_notice=False)
     return {
         "decision": "block",
         "reason": prompts.request(
-            usage.describe(), cfg["max_chars"], refresh=saved is not None, running=_labels(running),
-            kind=kind if split else "",
+            usage.describe(), cfg["max_chars"], refresh=saved is not None and not finished, running=_labels(running),
+            kind=kind if split else "", finished=finished,
         ),
-        "systemMessage": "\n".join([_asking(usage.tokens, kind if split else "", limits, saved, running), *why]),
+        "systemMessage": "\n".join(
+            [_asking(usage.tokens, kind if split else "", limits, saved, running, finished), *why]
+        ),
     }
 
 
-def _asking(tokens: int, kind: str, limits: config.Thresholds, saved: Optional[int], running: List[Dict[str, Any]]) -> str:
+def _asking(
+    tokens: int, kind: str, limits: config.Thresholds, saved: Optional[int], running: List[Dict[str, Any]],
+    finished: bool = False,
+) -> str:
     """What the request is for, and what happens after it, for the person."""
+    if finished:
+        return (
+            f"ContextRail: the background tasks that ran when the handoff was saved have finished; "
+            f"asking for the handoff again with their results. Context is at {tokens:,} tokens."
+        )
     if kind == "checkpoint":
         text = (
             f"ContextRail: context is at {tokens:,} tokens; asking for a checkpoint handoff. Work goes on after it; "
@@ -302,6 +355,7 @@ def _in_flight(tasks: Any) -> List[Dict[str, Any]]:
     return [
         task for task in tasks
         if isinstance(task, dict) and str(task.get("status") or "running").lower() in IN_FLIGHT
+        and str(task.get("type") or "") not in PASSIVE
     ]
 
 
@@ -369,7 +423,7 @@ def on_pre_compact(payload: Payload) -> Output:
         # counted from the first reply after it.
         entry.update(
             attempts=0, retries=0, saved_tokens=None, warned_tokens=None, gave_up=False, start_tokens=None,
-            asked_kind=None, saved_kind=None,
+            asked_kind=None, saved_kind=None, saved_running=False, question_notice=False,
         )
         entry["updated"] = time.time()
         store.save_state(project, state)

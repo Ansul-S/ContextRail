@@ -178,6 +178,17 @@ def splits(cfg: Dict[str, Any]) -> bool:
     return cfg["new_session_at"] == "hard" and not cfg["lightning_tokens"]
 
 
+def next_request(cfg: Dict[str, Any], limits: "Thresholds", saved: Optional[int], saved_kind: Optional[str]) -> int:
+    """The context at which the next handoff request is made: the handoff point, or once one is
+    saved, that plus refresh_tokens, and after a checkpoint no later than the wrap-up point."""
+    if saved is None:
+        return limits.soft
+    due = saved + cfg["refresh_tokens"]
+    if splits(cfg) and saved_kind == "checkpoint":
+        due = min(due, max(limits.hard, saved))  # the final handoff is asked for at the wrap-up point
+    return due
+
+
 def attended() -> bool:
     """Whether a person is at the keyboard. Claude Code sets the variable to 1 in interactive
     sessions and to 0 in claude -p and the Agent SDK; without it, a session counts as attended."""

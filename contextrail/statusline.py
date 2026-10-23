@@ -175,9 +175,7 @@ def _view(payload: Dict[str, Any], window: int) -> View:
         except OSError:
             pass
     attempts = entry.get("attempts") if isinstance(entry.get("attempts"), int) else 0
-    due = saved + cfg["refresh_tokens"] if saved is not None else limits.soft
-    if saved is not None and config.splits(cfg) and entry.get("saved_kind") == "checkpoint":
-        due = min(due, max(limits.hard, saved))  # the final handoff is asked for at the wrap-up point
+    due = config.next_request(cfg, limits, saved, entry.get("saved_kind"))
     return View(
         enabled=bool(cfg["enabled"]), soft=limits.soft, hard=limits.hard,
         due=due,

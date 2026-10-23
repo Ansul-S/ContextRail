@@ -60,9 +60,12 @@ RULES = """- Be specific and brief: file paths, function names, commands, number
 CHECKPOINT = "This handoff is a checkpoint:"
 
 
-def request(usage_line: str, max_chars: int, refresh: bool, running: str = "", kind: str = "") -> str:
+def request(
+    usage_line: str, max_chars: int, refresh: bool, running: str = "", kind: str = "", finished: bool = False
+) -> str:
     """running: the background tasks still in flight, as the user would recognise them.
-    kind: "checkpoint" before the hard point, "final" at it, "" when every handoff is final."""
+    kind: "checkpoint" before the hard point, "final" at it, "" when every handoff is final.
+    finished: the background tasks that ran when the last handoff was saved have finished since."""
     # mods/contextrail-continue recognises the request by its first words; a test keeps them in step.
     opening = (
         f"ContextRail: this session is at {usage_line}. "
@@ -75,6 +78,11 @@ def request(usage_line: str, max_chars: int, refresh: bool, running: str = "", k
         opening += f" {CHECKPOINT} work goes on in this session after it, and ContextRail asks for a final one later."
     elif kind == "final":
         opening += " This is the final handoff of this session: the user is offered a new session that starts from it."
+    if finished:
+        opening += (
+            " The background tasks that were still running when the last handoff was saved have finished: "
+            "write it again with their results, so the next session has them."
+        )
     if running:
         opening += (
             f" Background tasks are still running ({running}): list them under In progress, "
@@ -84,8 +92,7 @@ def request(usage_line: str, max_chars: int, refresh: bool, running: str = "", k
         f"{opening}\n\n"
         "Reply with the handoff block below, filled in. No tool calls are needed.\n"
         f"{RULES.format(max_chars=max_chars)}\n\n"
-        f"{TEMPLATE}\n\n"
-        "After the block, add one line only if you were waiting on the user: repeat that question."
+        f"{TEMPLATE}"
     )
 
 
