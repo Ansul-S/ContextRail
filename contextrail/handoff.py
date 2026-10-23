@@ -32,6 +32,11 @@ ALIASES = {
     "verify": "verify first",
 }
 MAX_RESUME_CHARS = 800
+# Sections that may lose their last items when the handoff is too long to load whole, least
+# needed first. Goal, User's rules, In progress, Next steps, Verify first and Resume prompt stay whole.
+TRIM_ORDER = ("known facts", "dead ends", "decisions", "how to run", "done", "open questions")
+SECTION_START_RE = re.compile(r"^##[ \t]", re.M)
+CUT_OFF = "… The rest is cut; read the full handoff."
 # Sections whose items the drift check holds against the files changed since.
 CLAIM_SECTIONS = ("done", "in progress")
 BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
@@ -203,6 +208,67 @@ def narrative_of(document: str) -> str:
     """The agent-written part of a saved handoff."""
     _, mark, rest = document.partition(NARRATIVE_MARK)
     return rest.strip() if mark else ""
+
+
+def units(text: str) -> int:
+    """Length the way Claude Code measures hook output: in UTF-16 code units."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _parts(narrative: str) -> List[List[str]]:
+    """The narrative as [text before the first heading], then [heading, item, item, ...]
+    per section. An item is a line that isn't indented, with the lines indented under it."""
+    starts = [match.start() for match in SECTION_START_RE.finditer(narrative)]
+    parts = [[narrative[: starts[0] if starts else len(narrative)].strip()]]
+    for begin, end in zip(starts, starts[1:] + [len(narrative)]):
+        heading, _, rest = narrative[begin:end].strip().partition("\n")
+        items: List[str] = []
+        for line in rest.strip("\n").splitlines():
+            if items and (not line.strip() or line[:1].isspace()):
+                items[-1] += "\n" + line
+            elif line.strip():
+                items.append(line)
+        parts.append([heading] + [item.rstrip() for item in items])
+    return parts
+
+
+def shorten(document: str, limit: int) -> str:
+    """A saved handoff cut to `limit` UTF-16 code units. Items are dropped from the end of
+    the TRIM_ORDER sections, least needed first, and each cut says how many items went. If
+    that is not enough, the text is cut off at the end."""
+    if units(document) <= limit:
+        return document
+    head, mark, narrative = document.partition(NARRATIVE_MARK)
+    if not mark:
+        head, narrative = "", document
+    parts = _parts(narrative)
+    keys = [""] + [_key(part[0]) for part in parts[1:]]
+    dropped = [0] * len(parts)
+
+    def render() -> str:
+        blocks = [head.rstrip() + "\n\n" + mark if mark else ""]
+        for part, count in zip(parts, dropped):
+            lines = part + ([f"- … {count} more in the full handoff"] if count else [])
+            blocks.append("\n".join(line for line in lines if line))
+        return "\n\n".join(block for block in blocks if block) + "\n"
+
+    text = render()
+    for kept in (1, 0):  # each section's first item goes only if cutting the rest is not enough
+        for key in TRIM_ORDER:
+            for i, part in enumerate(parts):
+                while keys[i] == key and len(part) > 1 + kept and units(text) > limit:
+                    part.pop()
+                    dropped[i] += 1
+                    text = render()
+    if units(text) <= limit:
+        return text
+    room = limit - units(CUT_OFF) - 1
+    if room <= 0:
+        return ""
+    text = text[:room]
+    while units(text) > room:  # characters outside the BMP take two units
+        text = text[:-1]
+    return text.rpartition("\n")[0] + "\n" + CUT_OFF
 
 
 def _edited(activity: Activity) -> str:

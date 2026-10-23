@@ -24,7 +24,7 @@ DEFAULTS: Dict[str, Any] = {
     # After a handoff is saved, ask again once context has grown by this much.
     "refresh_tokens": 40_000,
     # Upper limit for the part of the handoff the agent writes.
-    "max_chars": 12_000,
+    "max_chars": 8_000,
     # Also check the handoff against the session's facts (edited files, checks) before saving.
     "content_checks": True,
     # A session that edited files and ends without a handoff, this many tokens past its start, gets a checkpoint.
@@ -37,6 +37,8 @@ DEFAULTS: Dict[str, Any] = {
     "max_age_days": 30,
     "copy_resume_prompt": True,
     "history_keep": 20,
+    # Also run in sessions nobody is watching (claude -p, the Agent SDK). Off by default.
+    "unattended": False,
 }
 
 ENV_PREFIX = "CONTEXTRAIL_"
@@ -130,6 +132,12 @@ def load(project_dir: Optional[Path] = None) -> Dict[str, Any]:
     if os.environ.get("CONTEXTRAIL_DISABLE", "").strip().lower() in ("1", "true", "yes"):
         cfg["enabled"] = False
     return cfg
+
+
+def attended() -> bool:
+    """Whether a person is at the keyboard. Claude Code sets the variable to 1 in interactive
+    sessions and to 0 in claude -p and the Agent SDK; without it, a session counts as attended."""
+    return os.environ.get("CLAUDE_CODE_SESSION_ATTENDED", "").strip() != "0"
 
 
 def _invalid(updates: Dict[str, Any]) -> List[Tuple[str, str]]:

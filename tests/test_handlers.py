@@ -2,7 +2,7 @@ import json
 import os
 from unittest import mock
 
-from contextrail import handlers, handoff, store
+from contextrail import handlers, handoff, prompts, store
 from tests.helpers import START, VALID_BODY, TempHome, assistant, git, tool_result, tool_use, user, write_transcript
 
 
@@ -367,6 +367,9 @@ class SessionEndTest(TempHome):
 
 
 class SessionStartTest(TempHome):
+    def project(self):
+        return store.Project(self.repo)
+
     def start(self, source):
         return handlers.on_session_start(self.payload("SessionStart", source=source))
 
@@ -387,7 +390,27 @@ class SessionStartTest(TempHome):
             self.assertIn("Keep to the user's rules", context)
             self.assertIn("- None detected.", context)
             self.assertNotIn("<contextrail-handoff>", context)
-            self.assertIn("loaded the handoff saved just now (no repo changes since)", out["systemMessage"])
+            self.assertNotIn(prompts.SHORTENED, context)
+            self.assertIn(handoff.narrative_of(self.project().handoff.read_text()), context)
+            self.assertIn("loaded the handoff saved just now (no repo changes since).", out["systemMessage"])
+
+    def test_a_long_handoff_loads_shortened_under_claude_codes_limit(self):
+        facts = "".join(f"- Fact {i}: the limiter keeps a bucket per key, measured in run {i}.\n" for i in range(150))
+        body = VALID_BODY.replace("## Known facts\n", "## Known facts\n" + facts)
+        self.at_tokens(102_000)
+        with mock.patch.dict(os.environ, {"CONTEXTRAIL_MAX_CHARS": "50000"}):
+            handlers.on_stop(self.payload("Stop", last_assistant_message=block_message(body)))
+        self.assertGreater(handoff.units(self.project().handoff.read_text()), handlers.MAX_CONTEXT)
+        out = self.start("clear")
+        context = out["hookSpecificOutput"]["additionalContext"]
+        self.assertLessEqual(handoff.units(context), handlers.MAX_CONTEXT)
+        self.assertIn(f"- {prompts.SHORTENED}: ", context)
+        self.assertIn(f"Read {self.project().handoff} when you need them.", context)
+        self.assertIn("- Fact 0: ", context)
+        self.assertRegex(context, r"\n- … \d+ more in the full handoff\n")
+        for key in ("goal", "users rules", "in progress", "next steps", "verify first", "resume prompt"):
+            self.assertIn(handoff.sections(VALID_BODY)[key], context)
+        self.assertTrue(out["systemMessage"].endswith("(no repo changes since), shortened to fit Claude Code's limit for hook context."))
 
     def test_not_on_resume(self):
         self.save()

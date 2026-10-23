@@ -30,6 +30,9 @@ IN_FLIGHT = ("running", "pending")
 MAX_TASK_CHARS = 60
 HEARTBEAT = "heartbeat.json"
 HEARTBEAT_EVERY = 60
+# Claude Code moves hook context over 10,000 characters (UTF-16 code units, measured) to a file
+# and shows the model a 2 KB preview, so a longer handoff is loaded shortened. Stay a little under.
+MAX_CONTEXT = 9_800
 
 
 def heartbeat(event: str) -> None:
@@ -45,6 +48,14 @@ def heartbeat(event: str) -> None:
         store.write_atomic(path, json.dumps(beats, indent=2))
     except OSError:
         pass
+
+
+def unattended(payload: Payload) -> bool:
+    """Whether the hooks should do nothing in this session: no request, no load, no checkpoint.
+    Nobody is there to /clear, and a handoff from a scripted run would replace the person's."""
+    if config.attended():
+        return False  # the common case, decided without reading any settings
+    return not _open(payload)[2]["unattended"]
 
 
 def _now_iso() -> str:
@@ -387,12 +398,18 @@ def on_session_start(payload: Payload) -> Output:
         changes = f"{len(found.changed)} file(s) changed since"
     else:
         changes = f"{len(found.notes)} repo change(s) since" if found.notes else "no repo changes since"
+    context = prompts.loaded(saved_at, age, found.notes, flagged, document)
+    shortened = handoff.units(context) > MAX_CONTEXT
+    if shortened:
+        full = tilde(project.handoff)
+        room = MAX_CONTEXT - handoff.units(prompts.loaded(saved_at, age, found.notes, flagged, "", full))
+        context = prompts.loaded(saved_at, age, found.notes, flagged, handoff.shorten(document, room), full)
     return {
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": prompts.loaded(saved_at, age, found.notes, flagged, document),
-        },
-        "systemMessage": f"ContextRail: loaded the handoff saved {age} ({changes}).",
+        "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context},
+        "systemMessage": (
+            f"ContextRail: loaded the handoff saved {age} ({changes})"
+            + (", shortened to fit Claude Code's limit for hook context." if shortened else ".")
+        ),
     }
 
 

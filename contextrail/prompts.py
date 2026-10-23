@@ -3,9 +3,10 @@ TEMPLATE and RULES; tests keep the two in sync."""
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 MAX_FLAGGED = 2
+SHORTENED = "This copy is shortened to fit Claude Code's limit for hook context"
 
 TEMPLATE = """<contextrail-handoff>
 ## Goal
@@ -90,7 +91,11 @@ def wrap_up(usage_line: str) -> str:
     )
 
 
-def loaded(saved_at: str, age: str, drift_notes: List[str], flagged: List[str], document: str) -> str:
+def loaded(
+    saved_at: str, age: str, drift_notes: List[str], flagged: List[str], document: str, full: Optional[str] = None
+) -> str:
+    """The handoff as the next session sees it. With `full`, the path of the handoff,
+    the document is a shortened copy of it."""
     lines = list(drift_notes)
     if flagged:
         quoted = "; ".join(f'"{item}"' for item in flagged[:MAX_FLAGGED])
@@ -99,6 +104,11 @@ def loaded(saved_at: str, age: str, drift_notes: List[str], flagged: List[str], 
     if lines:
         lines.append("Start by running the Verify first commands.")
     drift_text = "\n".join(f"- {line}" for line in lines) if lines else "- None detected."
+    shortened = (
+        f"- {SHORTENED}: the last items of some sections are left out, and each cut says how many. "
+        f"Read {full} when you need them.\n"
+        if full else ""
+    )
     return (
         f'<contextrail-previous-handoff saved="{saved_at}" age="{age}">\n'
         "ContextRail loaded the handoff written at the end of the previous session in this "
@@ -107,7 +117,8 @@ def loaded(saved_at: str, age: str, drift_notes: List[str], flagged: List[str], 
         "changes listed below.\n"
         "- Keep to the user's rules it lists.\n"
         "- Don't redo work listed as done, and don't retry the dead ends.\n"
-        "- Wait for the user's message before starting work.\n\n"
+        "- Wait for the user's message before starting work.\n"
+        f"{shortened}\n"
         "Changes in the repository since the handoff:\n"
         f"{drift_text}\n\n"
         f"{document.strip()}\n"

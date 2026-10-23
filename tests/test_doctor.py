@@ -119,6 +119,25 @@ class DoctorTest(TempHome):
         self.assertEqual(delivery.status, "fail")
         self.assertIn("no additionalContext", delivery.detail)
 
+    def test_handoff_delivery_notes_a_shortened_load(self):
+        self.at_tokens(102_000)
+        body = VALID_BODY.replace("## Known facts\n", "## Known facts\n" + "- A long fact about the limiter.\n" * 400)
+        with mock.patch.dict(os.environ, {"CONTEXTRAIL_MAX_CHARS": "50000"}):
+            handlers.on_stop(self.payload("Stop", last_assistant_message=f"<contextrail-handoff>\n{body}\n</contextrail-handoff>"))
+        delivery = self.results()["Handoff"]
+        self.assertEqual(delivery.status, "ok")
+        self.assertTrue(delivery.detail.endswith(
+            "tokens), shortened to fit Claude Code's 10,000-character limit for hook context. Lower max_chars to load it whole"
+        ))
+
+    def test_warns_in_an_unattended_session(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ATTENDED": "0"}):
+            settings = self.results()["Settings"]
+            self.assertEqual(settings.status, "warn")
+            self.assertIn("this session is unattended (claude -p or the Agent SDK)", settings.detail)
+            with mock.patch.dict(os.environ, {"CONTEXTRAIL_UNATTENDED": "1"}):
+                self.assertEqual(self.results()["Settings"].status, "ok")
+
     def test_transcript_usage(self):
         self.assertEqual(self.results()["Transcript"].status, "warn")  # no sessions anywhere
 

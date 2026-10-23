@@ -148,6 +148,7 @@ class TempHome(unittest.TestCase):
         self._env.start()
         for key in [k for k in os.environ if k.startswith("CONTEXTRAIL_") and k not in env]:
             del os.environ[key]
+        os.environ.pop("CLAUDE_CODE_SESSION_ATTENDED", None)  # set when the tests run inside Claude Code
 
     def tearDown(self) -> None:
         self._env.stop()

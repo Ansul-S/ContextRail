@@ -7,6 +7,7 @@ Manual:                         cr.py status [DIR] | doctor [DIR] [--exit-zero] 
                                 cr.py history [--restore N] [DIR]
 """
 
+import importlib
 import json
 import sys
 import time
@@ -16,7 +17,8 @@ from pathlib import Path
 # Import the package from the plugin root, not modules from this folder.
 sys.path[0] = str(Path(__file__).resolve().parent.parent)
 
-from contextrail import __version__, config, doctor, handlers, history, status, statusline  # noqa: E402
+# The commands' modules are imported when used: hooks run on every tool call, and only need handlers.
+from contextrail import __version__, config, handlers  # noqa: E402
 
 ERROR_LOG_LIMIT = 256 * 1024
 
@@ -37,6 +39,7 @@ def log_error() -> None:
 
 def run_statusline(args):
     """The status line must keep working: errors are logged, and the wrapped command still runs."""
+    from contextrail import statusline
     try:
         raw = sys.stdin.buffer.read()
     except (OSError, ValueError):
@@ -59,12 +62,8 @@ def main(argv):
     if argv[1] in ("-V", "--version"):
         print(__version__)
         return 0
-    if argv[1] == "status":
-        return status.main(argv[2:])
-    if argv[1] == "doctor":
-        return doctor.main(argv[2:])
-    if argv[1] == "history":
-        return history.main(argv[2:])
+    if argv[1] in ("status", "doctor", "history"):
+        return importlib.import_module(f"contextrail.{argv[1]}").main(argv[2:])
     if argv[1] == "statusline":
         return run_statusline(argv[2:])
     if argv[1] not in handlers.HOOKS:
@@ -72,10 +71,18 @@ def main(argv):
         return 2
     event, handler = handlers.HOOKS[argv[1]]
     try:
+        try:
+            payload = json.loads(sys.stdin.read() or "{}")
+        except ValueError:
+            log_error()
+            payload = None
+        # Here, not in the handlers: the doctor runs those to see what a session would get.
+        if handlers.unattended(payload if isinstance(payload, dict) else {}):
+            return 0
         handlers.heartbeat(event)
         if event == "SessionStart":
-            statusline.note_plugin_root()  # here, not in the handler: the doctor runs that one
-        payload = json.loads(sys.stdin.read() or "{}")
+            from contextrail import statusline
+            statusline.note_plugin_root()
         output = handler(payload) if isinstance(payload, dict) else None
     except Exception:
         log_error()

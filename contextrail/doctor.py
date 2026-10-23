@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple
 
-from . import __version__, config, facts, handlers, statusline, store
+from . import __version__, config, facts, handlers, prompts, statusline, store
 from .config import tilde
 from .usage import REPORT_FRESH, claude_projects, last_usage, transcripts
 
@@ -155,6 +155,12 @@ def check_settings(project: store.Project, cfg: Dict[str, Any]) -> Result:
     origin = "from " + ", ".join(sources) if sources else "built-in defaults"
     if not cfg["enabled"]:
         return Result("warn", "Settings", f"ContextRail is turned off ({origin})")
+    if not config.attended() and not cfg["unattended"]:
+        return Result(
+            "warn", "Settings",
+            f"this session is unattended (claude -p or the Agent SDK), so the hooks do nothing in it. "
+            f"Set CONTEXTRAIL_UNATTENDED=1 to run them ({origin})",
+        )
     return Result("ok", "Settings", origin)
 
 
@@ -266,8 +272,13 @@ def check_delivery(root: Path, cfg: Dict[str, Any]) -> Result:
     context = (output.get("hookSpecificOutput") or {}).get("additionalContext")
     if not isinstance(context, str) or not context:
         return Result("fail", "Handoff", "the SessionStart hook returns no additionalContext, so the model won't see it")
+    shortened = (
+        ", shortened to fit Claude Code's 10,000-character limit for hook context. Lower max_chars to load it whole"
+        if prompts.SHORTENED in context else ""
+    )
     return Result(
-        "ok", "Handoff", f"loads on {', '.join(sources)}: {len(context):,} characters (≈{len(context) // 4:,} tokens)"
+        "ok", "Handoff",
+        f"loads on {', '.join(sources)}: {len(context):,} characters (≈{len(context) // 4:,} tokens){shortened}",
     )
 
 

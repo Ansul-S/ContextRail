@@ -54,6 +54,15 @@ class ConfigTest(TempHome):
         with mock.patch.dict(os.environ, {"CONTEXTRAIL_DISABLE": "1"}):
             self.assertFalse(config.load()["enabled"])
 
+    def test_attended_unless_claude_code_says_otherwise(self):
+        self.assertTrue(config.attended())
+        for value, expected in (("1", True), ("0", False), (" 0 ", False), ("", True)):
+            with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ATTENDED": value}):
+                self.assertEqual(config.attended(), expected, value)
+        self.assertFalse(config.load()["unattended"])
+        with mock.patch.dict(os.environ, {"CONTEXTRAIL_UNATTENDED": "1"}):
+            self.assertTrue(config.load()["unattended"])
+
     def test_problems_lists_what_load_ignores(self):
         self.assertEqual(config.problems(), [])
         self.home.mkdir(parents=True)

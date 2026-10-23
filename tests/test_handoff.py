@@ -171,6 +171,57 @@ class RenderTest(unittest.TestCase):
         self.assertIn("- Edited this session: 3 files outside the project\n", only_outside)
 
 
+class ShortenTest(unittest.TestCase):
+    def document(self, body):
+        return handoff.render("p", "t", "u", None, Activity(), body, [])
+
+    def body_with(self, section, items):
+        heading = f"## {section}\n"
+        start = VALID_BODY.index(heading) + len(heading)
+        end = VALID_BODY.index("\n\n## ", start)
+        return VALID_BODY[:end] + "".join(f"\n{item}" for item in items) + VALID_BODY[end:]
+
+    def test_units_count_utf16(self):
+        self.assertEqual(handoff.units("a≈😀"), 4)
+
+    def test_fits_already(self):
+        document = self.document(VALID_BODY)
+        self.assertEqual(handoff.shorten(document, handoff.units(document)), document)
+
+    def test_cuts_the_end_of_the_least_needed_section_first(self):
+        facts = [f"- Fact {i}: " + "detail " * 12 + "\n  - a nested note" for i in range(40)]
+        document = self.document(self.body_with("Known facts", facts))
+        limit = handoff.units(document) - 1_500
+        short = handoff.shorten(document, limit)
+        self.assertLessEqual(handoff.units(short), limit)
+        found = handoff.sections(handoff.narrative_of(short))
+        kept = found["known facts"].splitlines()
+        self.assertTrue(kept[0].startswith("- 3 routes need the limiter"))
+        self.assertRegex(kept[-1], r"^- … \d+ more in the full handoff$")
+        self.assertEqual(short.count("- Fact "), short.count("  - a nested note"))  # an item goes with its nested lines
+        for key, text in handoff.sections(VALID_BODY).items():
+            if key != "known facts":
+                self.assertEqual(found[key], text)
+
+    def test_first_items_go_last_and_in_order(self):
+        body = VALID_BODY.replace("## Known facts\n", "## Known facts\n- " + "a long fact " * 250 + "\n")
+        document = self.document(body)
+        short = handoff.shorten(document, handoff.units(document) - 2_000)
+        found = handoff.sections(handoff.narrative_of(short))
+        self.assertEqual(found["known facts"], "- … 4 more in the full handoff")
+        self.assertTrue(found["how to run"].endswith("\n- … 1 more in the full handoff"))
+        for key in ("dead ends", "decisions", "done", "open questions", "in progress", "next steps"):
+            self.assertEqual(found[key], handoff.sections(VALID_BODY)[key])
+
+    def test_cuts_the_text_when_trimming_is_not_enough(self):
+        body = VALID_BODY.replace("## In progress\n", "## In progress\n- " + "😀" * 3_000 + "\n")
+        short = handoff.shorten(self.document(body), 3_000)
+        self.assertLessEqual(handoff.units(short), 3_000)
+        self.assertTrue(short.startswith("# Handoff: p"))
+        self.assertTrue(short.endswith("\n" + handoff.CUT_OFF))
+        self.assertEqual(handoff.shorten(self.document(body), 10), "")
+
+
 class FallbackTest(unittest.TestCase):
     def test_carries_previous_narrative_once(self):
         first = handoff.fallback_body(VALID_BODY, "yesterday")
