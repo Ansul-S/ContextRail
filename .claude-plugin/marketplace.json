@@ -16,7 +16,7 @@
     {
       "name": "contextrail-continue",
       "source": "./mods/contextrail-continue",
-      "description": "Optional companion to ContextRail: after it saves a handoff, clears the session and continues from the handoff by itself. Needs a Claude Code version with mods (early access).",
+      "description": "Optional companion to ContextRail: after it saves a handoff, asks whether to start a new session from it, and clears and continues on yes. Needs a Claude Code version with mods (early access).",
       "version": "0.4.0",
       "category": "productivity",
       "homepage": "https://github.com/Ansul-S/ContextRail"

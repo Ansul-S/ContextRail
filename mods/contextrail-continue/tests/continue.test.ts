@@ -4,15 +4,30 @@ import type { On } from 'claude-code'
 
 const REQUEST = 'ContextRail: this session is at 102,000 tokens of context. The user set up ContextRail...'
 const FIX = 'ContextRail: the handoff needs fixing before it can be saved'
+const RESUME = 'Continue the API rate limiting in api/app.py.'
 const HANDOFF = [
   'Here is the handoff.',
   '<contextrail-handoff>',
   '## Goal',
   'Ship the limiter.',
   '## Resume prompt',
-  'Continue the API rate limiting in api/app.py.',
+  RESUME,
   '</contextrail-handoff>',
 ].join('\n')
+const QUESTION = 'ContextRail saved the handoff. Start a new session from it?'
+const PANE = {
+  plugin: 'contextrail-continue',
+  component: 'Pane',
+  requestId: 'contextrail-continue',
+  props: {
+    title: 'ContextRail',
+    isFocused: true,
+    bodyColumns: 100,
+    placement: 'inline',
+    scroll: { offset: 0, bodyRows: 4 },
+    view: {},
+  },
+} as const
 
 /**
  * Stands in for the engine and for ContextRail's own Stop hook beneath the mod,
@@ -20,8 +35,19 @@ const HANDOFF = [
  */
 function engine(on: On) {
   const clock = mock.clock(on)
-  const seen = { commands: [] as string[], prompts: [] as string[], toasts: [] as string[] }
-  const world = { stopAnswer: {} as { block?: string }, draft: '' }
+  const seen = {
+    commands: [] as string[],
+    prompts: [] as string[],
+    toasts: [] as string[],
+    opened: [] as string[],
+    closed: [] as string[],
+    asked: [] as unknown[],
+  }
+  const world = {
+    stopAnswer: {} as { block?: string },
+    isPlaced: true,
+    answer: undefined as string | undefined, // undefined: the dialog is dismissed
+  }
   on('classic.Stop', () => world.stopAnswer)
   on('command.run', (_, e) => {
     seen.commands.push(e.command)
@@ -31,16 +57,30 @@ function engine(on: On) {
     seen.prompts.push(e.text)
     return { text: e.text }
   })
-  on('prompt.read', () => ({ value: { text: world.draft, cursor: world.draft.length } }))
   on('ui.toast', (_, e) => {
     seen.toasts.push(e.text)
     return { value: undefined }
   })
+  on('ui.open', (_, e) => {
+    seen.opened.push(e.id)
+    return { value: world.isPlaced ? { isPlaced: true } : { isPlaced: false, reason: 'the terminal is 100 columns wide' } }
+  })
+  on('ui.close', (_, e) => {
+    seen.closed.push(e.id)
+    return { value: undefined }
+  })
+  on('tool.call', { tool: 'AskUserQuestion' }, (_, e) => {
+    seen.asked.push(e.questions)
+    if (world.answer === undefined) {
+      return { deny: 'The user dismissed the question.' }
+    }
+    return { result: { questions: e.questions, answers: { [QUESTION]: world.answer } } }
+  })
   return { clock, seen, world }
 }
 
-async function stop($: Engine, message: string, extra: { background_tasks?: never[] } = {}) {
-  return $.classic.Stop({ stop_hook_active: false, last_assistant_message: message, ...extra })
+async function stop($: Engine, message: string) {
+  return $.classic.Stop({ stop_hook_active: false, last_assistant_message: message })
 }
 
 async function requestThenSave($: Engine, world: { stopAnswer: { block?: string } }) {
@@ -50,63 +90,107 @@ async function requestThenSave($: Engine, world: { stopAnswer: { block?: string 
   await stop($, HANDOFF)
 }
 
-test('clears and continues with the resume prompt after ContextRail asked', async ($, on) => {
+test('asks in a pane once ContextRail asked and saved, and y clears and continues', async ($, on) => {
   const { clock, seen, world } = engine(on)
   await requestThenSave($, world)
-  expect(seen.toasts.at(-1)).toContain('Clearing and continuing in 10 s')
+  expect(seen.opened).toEqual([])
+  await clock.advance(500)
+  expect(seen.opened).toEqual(['contextrail-continue'])
 
-  await clock.advance(9_999)
+  await clock.advance(600_000)
   expect(seen.commands).toEqual([])
-  await clock.advance(1)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'yes' })
+  await clock.settle()
+  expect(seen.closed).toContain('contextrail-continue')
   expect(seen.commands).toEqual(['clear'])
-  expect(seen.prompts).toEqual(['Continue the API rate limiting in api/app.py.'])
+  expect(seen.prompts).toEqual([RESUME])
+  await ui.unmount()
 })
 
-test('waits while ContextRail asks for a fix', async ($, on) => {
+test('n keeps the session and says how to continue later', async ($, on) => {
+  const { clock, seen, world } = engine(on)
+  await requestThenSave($, world)
+  await clock.advance(500)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'no' })
+  await clock.advance(60_000)
+  expect(seen.commands).toEqual([])
+  expect(seen.closed).toContain('contextrail-continue')
+  expect(seen.toasts.at(-1)).toContain('kept this session')
+  await ui.unmount()
+})
+
+test('the pane shows the question and both keys, on every surface', async ($, on) => {
+  const { clock, world } = engine(on)
+  await requestThenSave($, world)
+  await clock.advance(500)
+  for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect((await ui.find({ type: 'Text', text: /Press y to start a new Claude Code session/ }))?.text).toContain(
+      'Press n to continue using the current session',
+    )
+    expect(await ui.findAll({ type: 'Button' })).toHaveLength(2)
+    expect(await ui.find({ type: 'Text', text: /ctrl\+x tab/ })).toBeUndefined()
+    await ui.unmount()
+  }
+  const unfocused = await $.ui.mount({ ...PANE, props: { ...PANE.props, isFocused: false }, surface: 'terminal' })
+  expect(await unfocused.find({ type: 'Text', text: /ctrl\+x tab/ })).toBeDefined()
+  await unfocused.unmount()
+})
+
+test('explains the Stop hook error and waits while ContextRail asks for a fix', async ($, on) => {
   const { clock, seen, world } = engine(on)
   world.stopAnswer = { block: REQUEST }
   await stop($, 'ok')
+  expect(seen.toasts.at(-1)).toContain('"Stop hook error" above is ContextRail\'s request')
   world.stopAnswer = { block: FIX }
   await stop($, HANDOFF)
   await clock.advance(60_000)
-  expect(seen.commands).toEqual([])
+  expect(seen.opened).toEqual([])
 
   world.stopAnswer = {}
   await stop($, HANDOFF)
-  await clock.advance(10_000)
-  expect(seen.commands).toEqual(['clear'])
+  await clock.advance(500)
+  expect(seen.opened).toEqual(['contextrail-continue'])
 })
 
 test('leaves a handoff the person asked for alone', async ($, on) => {
   const { clock, seen, world } = engine(on)
   world.stopAnswer = { block: 'Another plugin: run the linter before stopping.' }
   await stop($, 'ok')
+  expect(seen.toasts).toEqual([])
   world.stopAnswer = {}
   await stop($, HANDOFF)
   await clock.advance(60_000)
-  expect(seen.commands).toEqual([])
+  expect(seen.opened).toEqual([])
 })
 
-test('continues after a handoff the person asked for when after_manual is on', { options: { after_manual: true, delay_seconds: 0 } }, async ($, on) => {
+test('asks after a handoff the person asked for when after_manual is on', { options: { after_manual: true } }, async ($, on) => {
   const { clock, seen } = engine(on)
   await stop($, HANDOFF)
-  await clock.settle()
-  expect(seen.commands).toEqual(['clear'])
+  await clock.advance(500)
+  expect(seen.opened).toEqual(['contextrail-continue'])
 })
 
-test('a new turn or a draft in the prompt box keeps the session', async ($, on) => {
+test('a new turn or a prompt from the person takes the question back', async ($, on) => {
   const { clock, seen, world } = engine(on)
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   await requestThenSave($, world)
   await $.turn.start({ text: 'one more thing', turnId: 't2' })
   await clock.advance(60_000)
-  expect(seen.commands).toEqual([])
+  expect(seen.opened).toEqual([])
 
   await requestThenSave($, world)
-  world.draft = 'wait, first'
-  await clock.advance(10_000)
+  await clock.advance(500)
+  await $.prompt.submit({ text: 'wait, first this', origin: { kind: 'composer' }, wait: false })
+  expect(seen.closed).toContain('contextrail-continue')
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.findAll({ type: 'Button' })).toHaveLength(0)
+  await ui.unmount()
+  await clock.advance(60_000)
   expect(seen.commands).toEqual([])
-  expect(seen.toasts.at(-1)).toContain('kept this session because you are typing')
 })
 
 test('background tasks hold it', async ($, on) => {
@@ -120,25 +204,38 @@ test('background tasks hold it', async ($, on) => {
     background_tasks: [{ id: 'b1', type: 'shell', status: 'running', description: 'npm test' }],
   })
   await clock.advance(60_000)
-  expect(seen.commands).toEqual([])
-  expect(seen.toasts.at(-1)).toContain('Not clearing while background or scheduled tasks are pending')
+  expect(seen.opened).toEqual([])
+  expect(seen.toasts.at(-1)).toContain('Not offering a new session while background or scheduled tasks are pending')
 })
 
-test('stops continuing on its own after max_in_a_row until the person writes', { options: { max_in_a_row: 1 } }, async ($, on) => {
+test('asks in a dialog where the pane cannot be shown', async ($, on) => {
   const { clock, seen, world } = engine(on)
+  world.isPlaced = false
+  world.answer = 'Start a new session'
   await requestThenSave($, world)
-  await clock.advance(10_000)
+  await clock.advance(500)
+  await clock.settle()
+  expect(seen.closed).toContain('contextrail-continue')
+  expect(seen.asked).toHaveLength(1)
   expect(seen.commands).toEqual(['clear'])
+  expect(seen.prompts).toEqual([RESUME])
+})
 
+test('a dialog answered no, or dismissed, keeps the session', async ($, on) => {
+  const { clock, seen, world } = engine(on)
+  world.isPlaced = false
+  world.answer = 'Keep this session'
   await requestThenSave($, world)
-  await clock.advance(10_000)
-  expect(seen.commands).toEqual(['clear'])
-  expect(seen.toasts.at(-1)).toContain('Continued 1 times in a row')
+  await clock.advance(500)
+  await clock.settle()
+  expect(seen.toasts.at(-1)).toContain('kept this session')
 
-  await $.prompt.submit({ text: 'keep going', origin: { kind: 'composer' }, wait: false })
+  world.answer = undefined
   await requestThenSave($, world)
-  await clock.advance(10_000)
-  expect(seen.commands).toEqual(['clear', 'clear'])
+  await clock.advance(500)
+  await clock.settle()
+  expect(seen.asked).toHaveLength(2)
+  expect(seen.commands).toEqual([])
 })
 
 test('falls back to a generic prompt when the handoff has no resume prompt', async ($, on) => {
@@ -147,6 +244,10 @@ test('falls back to a generic prompt when the handoff has no resume prompt', asy
   await stop($, 'ok')
   world.stopAnswer = {}
   await stop($, '<contextrail-handoff>\n## Goal\nShip it.\n</contextrail-handoff>')
-  await clock.advance(10_000)
+  await clock.advance(500)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'yes' })
+  await clock.settle()
   expect(seen.prompts[0]).toContain('Verify first')
+  await ui.unmount()
 })

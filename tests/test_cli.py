@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import time
+from unittest import mock
 
 from contextrail import config, handlers, handoff, prompts, store
 from tests.helpers import CR, ROOT, VALID_BODY, TempHome
@@ -65,6 +66,26 @@ class CliTest(TempHome):
         self.assertEqual(sorted(beats), ["SessionStart", "Stop"])
         self.assertLessEqual(abs(beats["Stop"] - time.time()), 60)
 
+    def test_hooks_do_nothing_in_unattended_sessions(self):
+        self.at_tokens(102_000)
+        stop = json.dumps(self.payload("Stop", last_assistant_message="ok"))
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ATTENDED": "0"}):
+            for command, stdin in (("stop", stop), ("post-tool", stop), ("session-start", "not json")):
+                self.assertEqual(self.run_cr(command, stdin=stdin).stdout, "")
+            self.assertEqual([path.name for path in self.home.iterdir()], ["error.log"])  # the bad JSON; no heartbeat or state
+            with mock.patch.dict(os.environ, {"CONTEXTRAIL_UNATTENDED": "1"}):
+                self.assertEqual(json.loads(self.run_cr("stop", stdin=stop).stdout)["decision"], "block")
+            self.run_cr("stop", stdin=json.dumps(self.payload(
+                "Stop", last_assistant_message=f"<contextrail-handoff>\n{VALID_BODY}\n</contextrail-handoff>")))
+            self.assertFalse(store.Project(self.repo).handoff.exists())
+            project_config = store.Project(self.repo).dir / "config.json"
+            project_config.write_text(json.dumps({"unattended": True}))
+            self.assertIn("handoff saved", self.run_cr("stop", stdin=json.dumps(self.payload(
+                "Stop", last_assistant_message=f"<contextrail-handoff>\n{VALID_BODY}\n</contextrail-handoff>"))).stdout)
+        project_config.unlink()
+        self.assertIn("SessionStart", self.run_cr("session-start", stdin=json.dumps(
+            self.payload("SessionStart", source="clear"))).stdout)
+
     def test_unwritable_home_never_fails_the_hook(self):
         self.home.write_text("a file, not a folder")
         self.at_tokens(102_000)
@@ -96,10 +117,10 @@ class PluginFilesTest(TempHome):
         entry = market["plugins"][1]
         self.assertEqual(entry["name"], "contextrail-continue")
         self.assertTrue((ROOT / entry["source"] / ".claude-plugin/plugin.json").is_file())
-        self.assertEqual(json.loads((ROOT / entry["source"] / "hooks/hooks.json").read_text()), {"modules": ["./register.ts"]})
+        self.assertEqual(json.loads((ROOT / entry["source"] / "hooks/hooks.json").read_text()), {"modules": ["./register.tsx"]})
 
     def test_mod_reads_the_request_prefix_contextrail_sends(self):
-        register = (ROOT / "mods/contextrail-continue/hooks/register.ts").read_text()
+        register = (ROOT / "mods/contextrail-continue/hooks/register.tsx").read_text()
         prefix = register.split("const REQUEST = '")[1].split("'")[0]
         self.assertTrue(prompts.request("x tokens", 8_000, refresh=False).startswith(prefix))
         self.assertTrue(prompts.request("x tokens", 8_000, refresh=True).startswith(prefix))

@@ -1,7 +1,7 @@
 {
   "name": "contextrail-continue",
   "version": "0.4.0",
-  "description": "Optional companion to ContextRail: after it saves a handoff, clears the session and continues from the handoff by itself.",
+  "description": "Optional companion to ContextRail: after it saves a handoff, asks whether to start a new session from it, and clears and continues on yes.",
   "author": {
     "name": "Ansul-S"
   },
@@ -15,26 +15,10 @@
     "continue"
   ],
   "userConfig": {
-    "delay_seconds": {
-      "type": "number",
-      "title": "Delay before clearing (seconds)",
-      "description": "How long to wait after the handoff is saved. Start typing in that time to keep the session.",
-      "default": 10,
-      "min": 0,
-      "max": 300
-    },
-    "max_in_a_row": {
-      "type": "number",
-      "title": "Automatic continues in a row",
-      "description": "How many times to clear and continue without a prompt from you in between.",
-      "default": 3,
-      "min": 1,
-      "max": 20
-    },
     "after_manual": {
       "type": "boolean",
-      "title": "Continue after /contextrail:handoff too",
-      "description": "Also clear and continue after a handoff you asked for, not only after ContextRail's own request.",
+      "title": "Ask after /contextrail:handoff too",
+      "description": "Also offer a new session after a handoff you asked for, not only after ContextRail's own request.",
       "default": false
     }
   }
