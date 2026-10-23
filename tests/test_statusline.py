@@ -214,6 +214,26 @@ class StatusLineTest(TempHome):
         self.assertTrue(statusline.AMBER[1] > zone[4][1] > statusline.RED[1])
 
 
+    def test_lightning_draws_the_bolt_rail(self):
+        os.environ["CONTEXTRAIL_LIGHTNING_TOKENS"] = "200000"
+        self.assertEqual(
+            self.line_at(152_000),
+            "⚡━━━━━━━━━━━━━━━━━━●┄┄┄┄┄⚡  152k · new session at 200k · 48k to go · 15% of 1M window · Haiku 5.5 · repo",
+        )
+        self.assertTrue(self.line_at(205_000).startswith("⚡━━━━━━━━━━━━━━━━━━━━━━━●⚡  205k · ◆ handoff due ·"))
+        for columns in ("120", "100", "80", "60"):
+            with mock.patch.dict(os.environ, {"COLUMNS": columns}):
+                text = self.line_at(152_000)
+            # Each bolt takes two cells.
+            self.assertLessEqual(len(text) + text.count("⚡"), max(int(columns) - 4, 50), columns)
+            self.assertIn("new session at 200k", text)
+        del os.environ["NO_COLOR"]
+        with mock.patch.dict(os.environ, {"COLORTERM": "truecolor"}):
+            text = self.line_at(152_000)
+        self.assertIn("\x1b[38;2;59;158;255m━", text)
+        self.assertIn("\x1b[38;2;66;90;122m┄", text)
+        self.assertNotIn("230;167;46", text)  # no amber in Lightning Mode
+
 class WindowSourceTest(TempHome):
     def test_hooks_use_the_reported_window(self):
         statusline.record(sample(str(self.repo), session_id=self.transcript.stem))

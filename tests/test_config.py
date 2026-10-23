@@ -107,3 +107,28 @@ class ConfigTest(TempHome):
         self.assertEqual(config.thresholds(cfg, 200_000, 20_000), config.Thresholds(soft=100_000, hard=130_000))
         self.assertEqual(config.thresholds(cfg, 400_000, 50_000), config.Thresholds(soft=150_000, hard=180_000))
         self.assertEqual(config.thresholds(cfg, 250_000, 50_000), config.Thresholds(soft=125_000, hard=162_500))
+
+    def test_lightning_counts_the_whole_context(self):
+        cfg = config.load()
+        cfg.update(lightning_tokens=200_000)
+        self.assertEqual(config.thresholds(cfg, 1_000_000, 61_454), config.Thresholds(soft=200_000, hard=230_000))
+        # A session that starts near the limit still gets some work, and the window shares still cap it.
+        self.assertEqual(config.thresholds(cfg, 1_000_000, 190_000), config.Thresholds(soft=210_000, hard=240_000))
+        self.assertEqual(config.thresholds(cfg, 200_000, 50_000), config.Thresholds(soft=100_000, hard=130_000))
+        cfg.update(lightning_tokens=600_000)
+        self.assertEqual(config.thresholds(cfg, 1_000_000, 50_000), config.Thresholds(soft=500_000, hard=530_000))
+
+    def test_lightning_is_global_only(self):
+        self.home.mkdir(parents=True)
+        (self.home / "config.json").write_text(json.dumps({"lightning_tokens": 200_000}))
+        project_dir = self.home / "projects" / "p"
+        project_dir.mkdir(parents=True)
+        (project_dir / "config.json").write_text(json.dumps({"lightning_tokens": 0, "soft_tokens": 80_000}))
+        cfg = config.load(project_dir)
+        self.assertEqual((cfg["lightning_tokens"], cfg["soft_tokens"]), (200_000, 80_000))
+        self.assertEqual(
+            config.problems(project_dir),
+            [f"{project_dir / 'config.json'}: 'lightning_tokens' works only in {self.home / 'config.json'}"],
+        )
+        with mock.patch.dict(os.environ, {"CONTEXTRAIL_LIGHTNING_TOKENS": "0"}):
+            self.assertEqual(config.load(project_dir)["lightning_tokens"], 0)

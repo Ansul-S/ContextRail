@@ -144,10 +144,14 @@ class View:
     gave_up: bool
     waiting: bool
     project: str
+    lightning: bool = False  # Lightning Mode: the next request starts a new session
 
     @property
     def end(self) -> int:
-        """Where the rail ends: the wrap-up point, or past the next request after a save."""
+        """Where the rail ends: the wrap-up point, or past the next request after a save.
+        In Lightning Mode, at the next request, where the new session starts."""
+        if self.lightning:
+            return self.due
         return max(self.hard, self.due + max(self.hard - self.soft, self.due // 8))
 
 
@@ -159,7 +163,7 @@ def _view(payload: Dict[str, Any], window: int) -> View:
     entry = store.load_state(project)["sessions"].get(str(payload.get("session_id") or "")) if project else None
     entry = entry if isinstance(entry, dict) else {}
     start = entry.get("start_tokens")
-    if not isinstance(start, int):  # the Stop hook keeps it once the first turn ends
+    if not isinstance(start, int):  # the Stop hook keeps it once it is final
         transcript = payload.get("transcript_path")
         start = start_tokens(transcript if isinstance(transcript, str) else None) or 0
     limits = config.thresholds(cfg, cfg["window_tokens"] or window, start)
@@ -176,7 +180,7 @@ def _view(payload: Dict[str, Any], window: int) -> View:
         due=saved + cfg["refresh_tokens"] if saved is not None else limits.soft,
         saved=saved, saved_ago=ago, asked=attempts > 0 and not entry.get("gave_up"),
         gave_up=bool(entry.get("gave_up")), waiting=bool(entry.get("deferred_notice")) and attempts == 0,
-        project=project.root.name if project else "",
+        project=project.root.name if project else "", lightning=bool(cfg["lightning_tokens"]),
     )
 
 
@@ -186,6 +190,11 @@ AMBER: Colour = (230, 167, 46)
 RED: Colour = (229, 83, 75)
 TRACK: Colour = (88, 94, 104)
 DIM: Colour = (138, 145, 155)
+# Lightning Mode's Bolt rail: blue, brightening towards the new session, between two bolts.
+BLUE: Colour = (59, 158, 255)
+PALE: Colour = (156, 207, 255)
+BLUE_TRACK: Colour = (66, 90, 122)
+BOLT, BOLT_CELLS = "⚡", 2  # an emoji, two cells wide
 TRACK_CELLS, NARROW_TRACK_CELLS = 24, 16
 
 
@@ -213,6 +222,8 @@ def _zone(tokens: float, view: View) -> Colour:
     """Green while there is room, amber towards the handoff, red past the wrap-up point."""
     soft, hard = max(view.soft, 1), max(view.hard, 1)
     calm = 0.6 * soft
+    if view.lightning:
+        return BLUE if tokens <= calm else PALE if tokens >= soft else _mix(BLUE, PALE, (tokens - calm) / (soft - calm))
     if tokens <= calm:
         return GREEN
     if tokens <= soft:
@@ -234,7 +245,7 @@ def _rail(tokens: int, view: View, cells: int, mode: str) -> str:
         return min(cells - 1, int(value / per))
 
     head = at(tokens)
-    stations = {at(view.due): ("◆", AMBER)}
+    stations = {} if view.lightning else {at(view.due): ("◆", AMBER)}  # the end bolt marks it in Lightning
     if view.saved is not None:
         stations.setdefault(at(view.saved), ("◇", GREEN))
     runs: List[Tuple[str, str]] = []  # (text, escape sequence)
@@ -246,7 +257,7 @@ def _rail(tokens: int, view: View, cells: int, mode: str) -> str:
         elif cell < head:
             char, colour, bold = "━", _zone((cell + 0.5) * per, view), False
         else:
-            char, colour, bold = "┄", TRACK, False
+            char, colour, bold = "┄", BLUE_TRACK if view.lightning else TRACK, False
         start = _code(colour if view.enabled or char == "┄" else DIM, mode, bold)
         if runs and runs[-1][1] == start:
             runs[-1] = (runs[-1][0] + char, start)
@@ -264,15 +275,18 @@ def _state(tokens: int, view: View, mode: str) -> List[Tuple[int, str, str]]:
         return [part(9, "ContextRail off", DIM)]
     if view.gave_up:
         return [part(9, "✗ no handoff written", RED, True), part(5, "/contextrail:handoff", DIM)]
+    accent = BLUE if view.lightning else AMBER
     if view.asked:
-        return [part(9, "◆ handoff requested", AMBER, True)]
+        return [part(9, "◆ handoff requested", accent, True)]
     if tokens >= view.due:
         if view.waiting:
-            return [part(9, "◷ waiting for background tasks", AMBER, True)]
-        return [part(9, "◆ handoff due", AMBER, True)]
+            return [part(9, "◷ waiting for background tasks", accent, True)]
+        return [part(9, "◆ handoff due", accent, True)]
     if view.saved is not None:
         saved = "✓ saved" + (f" {_ago(view.saved_ago)}" if view.saved_ago is not None else "")
         return [part(9, saved, GREEN, True), part(6, f"next at {_short(view.due)}")]
+    if view.lightning:
+        return [part(9, f"new session at {_short(view.due)}", BLUE), part(3, f"{_short(view.due - tokens)} to go", DIM)]
     return [part(9, f"handoff at {_short(view.due)}"), part(3, f"{_short(view.due - tokens)} to go", DIM)]
 
 
@@ -303,8 +317,9 @@ def line(payload: Dict[str, Any]) -> str:
         room = 0
     room = room if room > 0 else 116
     cells = TRACK_CELLS
+    bolts = 2 * BOLT_CELLS if view.lightning else 0
     while True:
-        plain = cells + 2 + sum(len(text) for _, text, _ in parts) + 3 * (len(parts) - 1)
+        plain = cells + bolts + 2 + sum(len(text) for _, text, _ in parts) + 3 * (len(parts) - 1)
         if plain <= room or (cells == NARROW_TRACK_CELLS and len(parts) <= 2):
             break
         lowest = min(range(len(parts)), key=lambda i: parts[i][0])
@@ -313,7 +328,10 @@ def line(payload: Dict[str, Any]) -> str:
         else:
             cells = NARROW_TRACK_CELLS
     sep = _paint(" · ", DIM, mode)
-    return _rail(tokens, view, cells, mode) + "  " + sep.join(painted for _, _, painted in parts)
+    rail = _rail(tokens, view, cells, mode)
+    if view.lightning:
+        rail = BOLT + rail + BOLT
+    return rail + "  " + sep.join(painted for _, _, painted in parts)
 
 
 def show(args: List[str], raw: bytes) -> int:

@@ -46,7 +46,7 @@ class CliTest(TempHome):
         result = self.run_cr("status", str(self.repo))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"Project:   {self.repo}", result.stdout)
-        self.assertIn("Start:     2,000 tokens at its first reply; the token triggers count from there", result.stdout)
+        self.assertIn("Start:     2,000 tokens before any work; the token triggers count from there", result.stdout)
         self.assertIn("Triggers:  handoff at 100,000 tokens, wrap-up at 130,000", result.stdout)
         self.at_tokens(60_000, model="claude-opus-5-5[1m]", start=50_522)
         result = self.run_cr("status", str(self.repo))

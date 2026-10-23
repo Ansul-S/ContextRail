@@ -39,7 +39,16 @@ DEFAULTS: Dict[str, Any] = {
     "history_keep": 20,
     # Also run in sessions nobody is watching (claude -p, the Agent SDK). Off by default.
     "unattended": False,
+    # Lightning Mode (/contextrail:lightning): hand off once the context reaches this many tokens
+    # in all, and contextrail-continue starts a new session from the handoff after a countdown.
+    # 0 is off. Global only, so ContextRail and contextrail-continue read the same value.
+    "lightning_tokens": 0,
 }
+
+# Settings that a per-project config.json can't change.
+GLOBAL_ONLY = {"lightning_tokens"}
+# In Lightning Mode, a session that starts near the limit still gets this much work.
+LIGHTNING_MIN_WORK = 20_000
 
 ENV_PREFIX = "CONTEXTRAIL_"
 # Environment variables with the prefix that are not settings.
@@ -122,7 +131,8 @@ def load(project_dir: Optional[Path] = None) -> Dict[str, Any]:
     cfg = dict(DEFAULTS)
     _merge(cfg, _read_json(home() / "config.json"))
     if project_dir is not None:
-        _merge(cfg, _read_json(project_dir / "config.json"))
+        local = _read_json(project_dir / "config.json")
+        _merge(cfg, {key: value for key, value in local.items() if key not in GLOBAL_ONLY})
     env = {
         key: os.environ[ENV_PREFIX + key.upper()]
         for key in DEFAULTS
@@ -140,10 +150,13 @@ def attended() -> bool:
     return os.environ.get("CLAUDE_CODE_SESSION_ATTENDED", "").strip() != "0"
 
 
-def _invalid(updates: Dict[str, Any]) -> List[Tuple[str, str]]:
-    """(key, problem) for each setting that load() ignores or can't use."""
+def _invalid(updates: Dict[str, Any], local: bool = False) -> List[Tuple[str, str]]:
+    """(key, problem) for each setting that load() ignores or can't use; local for a per-project file."""
     found = []
     for key, value in updates.items():
+        if local and key in GLOBAL_ONLY:
+            found.append((key, f"works only in {tilde(home() / 'config.json')}"))
+            continue
         if key not in DEFAULTS:
             close = difflib.get_close_matches(key, DEFAULTS, n=1)
             found.append((key, "is not a setting" + (f" (did you mean '{close[0]}'?)" if close else "")))
@@ -178,7 +191,8 @@ def problems(project_dir: Optional[Path] = None) -> List[str]:
         if not isinstance(data, dict):
             found.append(f"{tilde(path)} must hold a JSON object")
             continue
-        found += [f"{tilde(path)}: '{key}' {problem}" for key, problem in _invalid(data)]
+        local = path != home() / "config.json"
+        found += [f"{tilde(path)}: '{key}' {problem}" for key, problem in _invalid(data, local)]
     env = {
         name[len(ENV_PREFIX):].lower(): value
         for name, value in os.environ.items()
@@ -197,7 +211,13 @@ class Thresholds:
 def thresholds(cfg: Dict[str, Any], window: int, start: int = 0) -> Thresholds:
     """The context sizes for the handoff request and the wrap-up warning. The
     token settings count from the session's start; the window shares cap them,
-    so a small window still hands off before auto-compaction."""
-    soft = min(start + cfg["soft_tokens"], window * cfg["soft_pct"] // 100)
-    hard = min(start + cfg["hard_tokens"], window * cfg["hard_pct"] // 100)
+    so a small window still hands off before auto-compaction. In Lightning Mode the handoff
+    comes at the Lightning size instead, which counts the whole context."""
+    lightning = cfg["lightning_tokens"]
+    if lightning:
+        soft = min(max(lightning, start + LIGHTNING_MIN_WORK), window * cfg["soft_pct"] // 100)
+        hard = min(soft + cfg["hard_tokens"] - cfg["soft_tokens"], window * cfg["hard_pct"] // 100)
+    else:
+        soft = min(start + cfg["soft_tokens"], window * cfg["soft_pct"] // 100)
+        hard = min(start + cfg["hard_tokens"], window * cfg["hard_pct"] // 100)
     return Thresholds(soft=soft, hard=max(hard, soft))

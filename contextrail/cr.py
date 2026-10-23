@@ -5,6 +5,7 @@ Hooks (JSON payload on stdin):  cr.py stop | post-tool | pre-compact | session-s
 Status line (optional):         cr.py statusline [-- COMMAND]
 Manual:                         cr.py status [DIR] | doctor [DIR] [--exit-zero] [--setup-statusline]
                                 cr.py history [--restore N] [DIR]
+                                cr.py lightning [LIMIT | off]
 """
 
 import importlib
@@ -62,7 +63,7 @@ def main(argv):
     if argv[1] in ("-V", "--version"):
         print(__version__)
         return 0
-    if argv[1] in ("status", "doctor", "history"):
+    if argv[1] in ("status", "doctor", "history", "lightning"):
         return importlib.import_module(f"contextrail.{argv[1]}").main(argv[2:])
     if argv[1] == "statusline":
         return run_statusline(argv[2:])

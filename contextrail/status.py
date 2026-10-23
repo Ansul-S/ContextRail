@@ -26,7 +26,7 @@ def main(args: List[str]) -> int:
     limits = config.thresholds(cfg, usage.window if usage else cfg["window_tokens"] or DEFAULT_WINDOW, start)
     if usage:
         print(f"Context:   {usage.describe()}, latest session")
-        print(f"Start:     {start:,} tokens at its first reply; the token triggers count from there")
+        print(f"Start:     {start:,} tokens before any work; the token triggers count from there")
         print(f"Window:    {usage.window:,} tokens, from {doctor.WINDOW_SOURCES[usage.window_source]}")
     else:
         print("Context:   no session transcript found for this folder")
@@ -34,6 +34,8 @@ def main(args: List[str]) -> int:
         f"Triggers:  handoff at {limits.soft:,} tokens, wrap-up at {limits.hard:,}, "
         f"then again every {cfg['refresh_tokens']:,}"
     )
+    if cfg["lightning_tokens"]:
+        print(f"Lightning: on at {cfg['lightning_tokens']:,}: a new session starts after the handoff (/contextrail:lightning)")
     errors = doctor.recent_errors(doctor.DAY)
     if errors:
         print(f"Errors:    {len(errors)} in the last 24 h. Run /contextrail:doctor")
