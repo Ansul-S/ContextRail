@@ -55,23 +55,41 @@ function resumePromptOf(body: string): string | undefined {
 }
 
 /**
+ * A `lightning_tokens` value as ContextRail's config reads it (Python's `int()`):
+ * a number cut to a whole one, or a string of digits; undefined where it can't
+ * use the value, which then keeps the one before.
+ */
+function tokensOf(value: unknown): number | undefined {
+  let tokens: number
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    tokens = Math.trunc(value)
+  } else if (typeof value === 'string' && /^\s*[+-]?\d+(?:_\d+)*\s*$/.test(value)) {
+    tokens = Number(value.trim().replace(/_/g, ''))
+  } else {
+    return undefined // a boolean, null, a list, or text like "2e5" or "200k"
+  }
+  return tokens < 0 ? undefined : tokens
+}
+
+/**
  * Whether Lightning Mode is on: ContextRail's `lightning_tokens` from its
  * environment variable, else from the global config.json, where
  * `/contextrail:lightning` writes it. ContextRail reads it only there too.
  */
 async function isLightning($: EngineInterface): Promise<boolean> {
-  let value: unknown = await $.env.get('CONTEXTRAIL_LIGHTNING_TOKENS')
-  if (value === undefined) {
-    const home = (await $.env.get('HOME')) ?? ''
-    const root = ((await $.env.get('CONTEXTRAIL_HOME')) ?? `${home}/.contextrail`).replace(/^~(?=\/|$)/, home)
-    try {
-      value = JSON.parse(await $.fs.read(`${root}/config.json`))?.lightning_tokens
-    } catch {
-      value = undefined // no config.json, or not JSON: ContextRail's defaults, Lightning off
-    }
+  const fromEnv = tokensOf(await $.env.get('CONTEXTRAIL_LIGHTNING_TOKENS'))
+  if (fromEnv !== undefined) {
+    return fromEnv > 0
   }
-  const tokens = typeof value === 'boolean' ? 0 : Number(value)
-  return Number.isInteger(tokens) && tokens > 0
+  const home = (await $.env.get('HOME')) ?? ''
+  const root = ((await $.env.get('CONTEXTRAIL_HOME')) || `${home}/.contextrail`).replace(/^~(?=\/|$)/, home)
+  let value: unknown
+  try {
+    value = JSON.parse(await $.fs.read(`${root}/config.json`))?.lightning_tokens
+  } catch {
+    value = undefined // no config.json, or not JSON: ContextRail's defaults, Lightning off
+  }
+  return (tokensOf(value) ?? 0) > 0
 }
 
 /** Drops the question or countdown without an answer: the person carried on in this session. */

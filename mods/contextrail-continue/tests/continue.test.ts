@@ -33,7 +33,7 @@ const PANE = {
  * Stands in for the engine and for ContextRail's own Stop hook beneath the mod,
  * and records what the mod asks of the session.
  */
-function engine(on: On) {
+function engine(on: On, env: Record<string, string> = {}) {
   const clock = mock.clock(on)
   const seen = {
     commands: [] as string[],
@@ -47,15 +47,18 @@ function engine(on: On) {
     stopAnswer: {} as { block?: string },
     isPlaced: true,
     answer: undefined as string | undefined, // undefined: the dialog is dismissed
-    config: undefined as string | undefined, // ~/.contextrail/config.json; undefined: there is none
+    config: undefined as string | undefined, // ContextRail's config.json; undefined: there is none
+    configPath: '/Users/test/.contextrail/config.json',
+    draft: '', // what the person has typed in the composer
   }
-  mock.env(on, { HOME: '/Users/test' })
+  mock.env(on, { HOME: '/Users/test', ...env })
   on('fs.read', (_, e) => {
-    if (e.path !== '/Users/test/.contextrail/config.json' || world.config === undefined) {
+    if (e.path !== world.configPath || world.config === undefined) {
       return { deny: `ENOENT: no such file, open '${e.path}'` }
     }
     return { value: world.config }
   })
+  on('prompt.read', () => ({ value: { text: world.draft, cursor: world.draft.length } }))
   on('classic.Stop', () => world.stopAnswer)
   on('command.run', (_, e) => {
     seen.commands.push(e.command)
@@ -291,4 +294,155 @@ test('falls back to a generic prompt when the handoff has no resume prompt', asy
   await clock.settle()
   expect(seen.prompts[0]).toContain('Verify first')
   await ui.unmount()
+})
+
+const LIGHTNING = '{"lightning_tokens":200000}'
+const LIGHTNING_PANE = {
+  ...PANE,
+  props: { ...PANE.props, title: '⚡ ContextRail', scroll: { offset: 0, bodyRows: 3 } },
+} as const
+
+test('Lightning Mode counts down in the pane and starts a new session at 0', async ($, on) => {
+  const { clock, seen, world } = engine(on)
+  world.config = LIGHTNING
+  await requestThenSave($, world)
+  await clock.advance(500)
+  expect(seen.opened).toEqual(['contextrail-continue'])
+  const ui = await $.ui.mount({ ...LIGHTNING_PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /starting a new session in 10 s/ })).toBeDefined()
+  expect(await ui.findAll({ type: 'Button' })).toHaveLength(2)
+
+  await clock.advance(3_000)
+  expect(await ui.find({ type: 'Text', text: /starting a new session in 7 s/ })).toBeDefined()
+  await clock.advance(6_000)
+  expect(seen.commands).toEqual([])
+
+  await clock.advance(1_000)
+  await clock.settle()
+  expect(seen.closed).toContain('contextrail-continue')
+  expect(seen.commands).toEqual(['clear'])
+  expect(seen.prompts).toEqual([RESUME])
+  expect(seen.asked).toEqual([])
+  await ui.unmount()
+})
+
+test('y in the Lightning pane starts the new session at once', async ($, on) => {
+  const { clock, seen, world } = engine(on)
+  world.config = LIGHTNING
+  await requestThenSave($, world)
+  await clock.advance(2_500)
+  const ui = await $.ui.mount({ ...LIGHTNING_PANE, surface: 'terminal' })
+  await ui.press({ key: 'now' })
+  await clock.settle()
+  expect(seen.commands).toEqual(['clear'])
+  expect(seen.prompts).toEqual([RESUME])
+  await clock.advance(60_000)
+  expect(seen.commands).toEqual(['clear'])
+  await ui.unmount()
+})
+
+test('n stops the countdown and keeps the session', async ($, on) => {
+  const { clock, seen, world } = engine(on)
+  world.config = LIGHTNING
+  await requestThenSave($, world)
+  await clock.advance(3_500)
+  const ui = await $.ui.mount({ ...LIGHTNING_PANE, surface: 'terminal' })
+  await ui.press({ key: 'stay' })
+  expect(seen.closed).toContain('contextrail-continue')
+  expect(seen.toasts.at(-1)).toContain('kept this session')
+  await clock.advance(60_000)
+  expect(seen.commands).toEqual([])
+  await ui.unmount()
+})
+
+test('text in the composer when the countdown ends keeps the session', async ($, on) => {
+  const { clock, seen, world } = engine(on)
+  world.config = LIGHTNING
+  await requestThenSave($, world)
+  await clock.advance(500)
+  world.draft = 'wait, one more'
+  await clock.advance(10_000)
+  await clock.settle()
+  expect(seen.commands).toEqual([])
+  expect(seen.closed).toContain('contextrail-continue')
+  expect(seen.toasts.at(-1)).toContain('kept this session because you are typing')
+  await clock.advance(60_000)
+  expect(seen.commands).toEqual([])
+})
+
+test('a prompt from the person stops the countdown', async ($, on) => {
+  const { clock, seen, world } = engine(on)
+  world.config = LIGHTNING
+  await requestThenSave($, world)
+  await clock.advance(4_500)
+  await $.prompt.submit({ text: 'one more thing', origin: { kind: 'composer' }, wait: false })
+  expect(seen.closed).toContain('contextrail-continue')
+  await clock.advance(60_000)
+  expect(seen.commands).toEqual([])
+})
+
+test('Lightning counts down in a toast where no pane can be shown', async ($, on) => {
+  const { clock, seen, world } = engine(on)
+  world.config = LIGHTNING
+  world.isPlaced = false
+  await requestThenSave($, world)
+  await clock.advance(500)
+  await clock.settle()
+  expect(seen.closed).toContain('contextrail-continue')
+  expect(seen.toasts.at(-1)).toContain('Lightning Mode: handoff saved. Starting a new session in 10 s')
+  expect(seen.asked).toEqual([])
+  await clock.advance(9_000)
+  expect(seen.commands).toEqual([])
+  await clock.advance(1_000)
+  await clock.settle()
+  expect(seen.commands).toEqual(['clear'])
+  expect(seen.prompts).toEqual([RESUME])
+})
+
+// Whether Lightning is on, read as ContextRail's config reads lightning_tokens:
+// the environment variable when it holds a usable value, else the global config.json.
+const READINGS: [string, Record<string, string>, string | undefined, boolean][] = [
+  ['no config.json', {}, undefined, false],
+  ['a whole number', {}, LIGHTNING, true],
+  ['0', {}, '{"lightning_tokens":0}', false],
+  ['a fraction, cut to a whole number', {}, '{"lightning_tokens":200000.5}', true],
+  ['a fraction below 1', {}, '{"lightning_tokens":0.5}', false],
+  ['a negative number', {}, '{"lightning_tokens":-200000}', false],
+  ['digits in a string', {}, '{"lightning_tokens":" 200_000 "}', true],
+  ['a string in exponent form', {}, '{"lightning_tokens":"2e5"}', false],
+  ['a string with a unit', {}, '{"lightning_tokens":"200k"}', false],
+  ['true', {}, '{"lightning_tokens":true}', false],
+  ['null', {}, '{"lightning_tokens":null}', false],
+  ['a config.json that is not JSON', {}, '{"lightning_tokens":200000', false],
+  ['the variable over config.json', { CONTEXTRAIL_LIGHTNING_TOKENS: '0' }, LIGHTNING, false],
+  ['the variable alone', { CONTEXTRAIL_LIGHTNING_TOKENS: ' 150000 ' }, undefined, true],
+  ['config.json under an unusable variable', { CONTEXTRAIL_LIGHTNING_TOKENS: 'lots' }, LIGHTNING, true],
+  ['an exponent in the variable', { CONTEXTRAIL_LIGHTNING_TOKENS: '2e5' }, '{"lightning_tokens":0}', false],
+  ['config.json under an empty CONTEXTRAIL_HOME', { CONTEXTRAIL_HOME: '' }, LIGHTNING, true],
+]
+
+for (const [label, env, config, isOn] of READINGS) {
+  test(`Lightning is ${isOn ? 'on' : 'off'} with ${label}`, async ($, on) => {
+    const { clock, seen, world } = engine(on, env)
+    world.config = config
+    world.isPlaced = false
+    world.answer = 'Keep this session'
+    await requestThenSave($, world)
+    await clock.advance(500)
+    await clock.settle()
+    expect(seen.asked).toHaveLength(isOn ? 0 : 1)
+    expect(seen.toasts.some(toast => toast.includes('Lightning Mode'))).toBe(isOn)
+  })
+}
+
+test('Lightning reads config.json from CONTEXTRAIL_HOME', async ($, on) => {
+  const { clock, seen, world } = engine(on, { CONTEXTRAIL_HOME: '~/state/contextrail' })
+  world.config = LIGHTNING
+  world.configPath = '/Users/test/state/contextrail/config.json'
+  world.isPlaced = false
+  await requestThenSave($, world)
+  await clock.advance(500)
+  await clock.settle()
+  expect(seen.asked).toEqual([])
+  expect(seen.toasts.at(-1)).toContain('Lightning Mode')
 })

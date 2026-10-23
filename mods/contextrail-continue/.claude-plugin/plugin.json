@@ -1,7 +1,7 @@
 {
   "name": "contextrail-continue",
   "version": "0.4.0",
-  "description": "Optional companion to ContextRail: after it saves a handoff, asks whether to start a new session from it, and clears and continues on yes.",
+  "description": "Optional companion to ContextRail: after it saves a handoff, asks whether to start a new session from it, and clears and continues on yes. In Lightning Mode it starts the new session after a 10-second countdown.",
   "author": {
     "name": "Ansul-S"
   },
