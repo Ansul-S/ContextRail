@@ -39,11 +39,11 @@ To try it without installing, clone the repository and start Claude Code with `c
 
 Most of the time you do nothing:
 
-- **100k tokens into the session**, counted from its first reply, when the agent finishes a turn, ContextRail asks it for a handoff. The agent replies with it, and ContextRail saves it and tells you. Claude Code labels the request "Stop hook error occurred", because it reaches the agent the way a Stop hook's objection does. Nothing has failed.
-- **If background tasks are still running** (a test run in the background, a subagent), ContextRail waits until they finish, because their results belong in the handoff. It says so once, and stops waiting 130k tokens into the session.
+- **100k tokens into the session**, counted from where it started, when the agent finishes a turn, ContextRail asks it for a handoff. The agent replies with it, and ContextRail saves it and tells you. Claude Code labels the request "Stop hook error occurred", because it reaches the agent the way a Stop hook's objection does. Nothing has failed.
+- **If background tasks are still running** (a test run in the background, a subagent), ContextRail waits until they finish, because their results belong in the handoff. It says so once, and stops waiting 130k tokens into the session. Then the handoff lists the tasks still running, with how to check their results.
 - **Type `/clear`.** The new session starts with the handoff loaded. Paste the resume prompt from your clipboard, or just say "continue".
 - **If you keep going instead**, ContextRail asks for a fresh handoff every 40k tokens.
-- **130k tokens into the session, in the middle of a long turn**, the agent is told to finish the current step and stop starting new work.
+- **130k tokens into the session, in the middle of a long turn**, the agent is told to finish the step it is on and not start another: run the commands the step still needs, let running commands finish, and show you their results.
 - **Before compaction**, ContextRail saves the facts and carries over the last narrative, so a compacted session still gets a handoff.
 - **When a session ends without a handoff** (you `/clear` or exit before the request), and it edited files and grew by 30k tokens, ContextRail saves a checkpoint the same way, so the next session still knows where you left off. Claude Code gives this about 1.5 seconds and doesn't run it at all after a crash or a killed terminal, so it is a safety net, not a replacement for the handoff.
 - **Scripted runs are left alone.** In `claude -p` and the Agent SDK nobody is there to type `/clear`, and a handoff written by a script would replace yours, so ContextRail does nothing there. Set `unattended` to `true` to have it run in them too.
@@ -56,6 +56,7 @@ Commands:
 | `/contextrail:status` | Show context usage, trigger points, the saved handoff, and what changed since it was saved. |
 | `/contextrail:doctor` | Check the setup: Python, the hooks, storage and settings, when each hook last ran, whether usage can be read, and whether the saved handoff would load. `--setup-statusline` sets up the optional status-line wrapper. |
 | `/contextrail:history` | List the saved handoffs, newest first, with each one's first next step. `/contextrail:history --restore N` makes an archived one current again. |
+| `/contextrail:lightning` | Turn on Lightning Mode at a context size, for example `/contextrail:lightning 200k`, or turn it off with `off`. See Lightning Mode. |
 
 ## One-key continue (optional)
 
@@ -70,7 +71,7 @@ y: Start a new session   n: Keep this session
 - **y** runs `/clear` and sends the handoff's resume prompt, so the work carries on in a fresh session with the handoff loaded.
 - **n**, or Esc, keeps the current session. The handoff stays saved, and `/clear` loads it whenever you are ready.
 
-The question waits for your answer, however long that takes.
+The question waits for your answer, however long that takes. In Lightning Mode it counts down instead (see below).
 
 ```
 /plugin install contextrail-continue@contextrail
@@ -80,8 +81,8 @@ It is a mod, a newer kind of Claude Code plugin written in TypeScript. Mods are 
 
 - **Narrow terminals:** Claude Code only shows a pane it didn't ask for in a terminal at least 144 columns wide. In a narrower one, the plugin asks the same question in Claude Code's question dialog.
 - **The keys** work while the pane has the keyboard. It takes the keyboard when the prompt box is empty. If you were typing, press ctrl+x tab to reach it.
-- **The question is withdrawn** when you send a prompt, or a new turn starts (a background task's notification, for example). You stay in the current session.
-- **It doesn't ask** while background or scheduled tasks (such as `/loop`) are still pending.
+- **The question is withdrawn** when you send a prompt. You stay in the current session.
+- **It waits for background work:** while background or scheduled tasks (such as `/loop`) are still pending, it holds the question until they finish and the agent has shown their results. A new turn, such as a task's notification, takes an open question back until that turn ends.
 - **It explains the label:** when ContextRail asks for a handoff, the plugin shows a note that the "Stop hook error" above is ContextRail's request.
 
 | Setting | Default | Meaning |
@@ -89,6 +90,27 @@ It is a mod, a newer kind of Claude Code plugin written in TypeScript. Mods are 
 | `after_manual` | off | Also ask after a handoff you asked for with `/contextrail:handoff`. |
 
 The setting is offered when you install the plugin, and is in `/config` afterwards.
+
+## Lightning Mode (optional)
+
+Lightning Mode starts a new session on its own once the context reaches a size you choose:
+
+```
+/contextrail:lightning 200k
+```
+
+- **At 200k tokens of context**, counted in all rather than from the session's start, ContextRail asks for the handoff as usual.
+- **Once it is saved**, `contextrail-continue` counts down 10 seconds in a blue pane, then runs `/clear` and sends the resume prompt.
+- **To stay**, press n or Esc, or send a prompt. Text in the prompt box when the countdown ends also keeps the session. y starts the new session at once.
+- **ContextRail's rail turns blue** (see The rail), between two bolts, and ends where the new session starts:
+
+  ```
+  ⚡━━━━━━━━━━━━━━━━━━●┄┄┄┄┄⚡  152k · new session at 200k · 48k to go · 15% of 1M window · Opus 5.5 · my-project
+  ```
+
+The limit can be written 200k, 0.2M, 200000 or 200,000, and must be at least 10k. A session that starts near it still gets 20k tokens of work before the handoff. `soft_pct` still caps it, so on a 200k window the handoff comes at 100k at the latest. The wrap-up warning comes 30k after the handoff point, the gap between `hard_tokens` and `soft_tokens`.
+
+`/contextrail:lightning off` turns it off, and `/contextrail:lightning` alone shows the setting. It is saved as `lightning_tokens` in `~/.contextrail/config.json`, so it applies in every project. On a terminal too narrow for the pane, a note says when the new session starts; start typing to stay. Without `contextrail-continue`, the handoff is still saved at the limit, and `/clear` continues from it.
 
 ## When it triggers, and why
 
@@ -100,7 +122,7 @@ The setting is offered when you install the plugin, and is in `/config` afterwar
 
 Why these numbers:
 
-- **Sessions don't start empty.** Claude Code's system prompt and tools, skills, MCP instructions, `CLAUDE.md` files and the loaded handoff often add up to 30-50k tokens before any work. So the token settings count from the context at the session's first reply, or the first one after compaction. With a 50k start, the handoff comes at about 150k and the wrap-up at 180k. `/contextrail:status` shows the start.
+- **Sessions don't start empty.** Claude Code's system prompt and tools, skills, MCP instructions, `CLAUDE.md` files and the loaded handoff often add up to 30-50k tokens before any work. So the token settings count from the context at the session's first reply, or the first one after compaction. Claude Code sometimes sends its skill, agent and MCP listings only after the first reply, which can add about 30k tokens. Then the start is the context at the second reply. With a 50k start, the handoff comes at about 150k and the wrap-up at 180k. `/contextrail:status` shows the start.
 - **Usable space is smaller than the window.** Claude Code reserves roughly 16% of the window for auto-compaction. 50% of the raw window is about 60% of the space you can actually use.
 - **The agent needs to still be sharp.** Asking at 50% leaves headroom for writing the handoff (3-5k tokens) while the agent is still at its best. Auto-compaction fires around 83%, which is too late for a good summary.
 - **Absolute tokens matter more than percentages.** Quality declines gradually with length, whatever the window size. On a 1M-token window, 50% would mean 500k tokens, far past the point where long sessions get unreliable. That is why the token setting usually decides. On a 200k window the shares decide instead (100k and 130k), so a session still hands off before auto-compaction, wherever it started.
@@ -175,6 +197,7 @@ Settings are applied in this order, later ones winning:
   "copy_resume_prompt": true,
   "history_keep": 20,
   "unattended": false,
+  "lightning_tokens": 0,
   "enabled": true
 }
 ```
@@ -184,6 +207,7 @@ Settings are applied in this order, later ones winning:
 - `content_checks` holds the handoff against what ContextRail recorded before saving it: uncommitted files edited in the session that it never mentions, a Done section with no evidence, a first next step with nothing concrete in it, and a Done item that says a check passed when the facts show it failed. A gap gets the one fix request.
 - `checkpoint_tokens` is how far a session must grow past its start, having edited files, to get a checkpoint when it ends without a handoff.
 - `inject_on` sets which session starts load the handoff (`startup`, `clear`, `compact`, `resume`).
+- `lightning_tokens` turns on Lightning Mode at that many tokens of context; 0 is off. It works only in `~/.contextrail/config.json` and `CONTEXTRAIL_LIGHTNING_TOKENS`, so ContextRail and `contextrail-continue` read the same value. `/contextrail:doctor` flags it in a project's `config.json`.
 - To turn ContextRail off everywhere, set `CONTEXTRAIL_DISABLE=1`. To turn it off for one project, put `{"enabled": false}` in that project's `config.json`.
 
 ## Where files live
@@ -247,9 +271,9 @@ Everything is standard-library Python 3.9+, with no dependencies. To try changes
 ```
 .claude-plugin/        plugin and marketplace manifests
 hooks/hooks.json       Stop, PostToolUse, PreCompact, SessionStart and SessionEnd hooks
-commands/              /contextrail:handoff, :status, :doctor and :history
-contextrail/cr.py      entry point for hooks, the status line and the status, doctor and history commands
-contextrail/*.py       usage, facts, handoff, storage, config, prompts, status, doctor, history and statusline
+commands/              /contextrail:handoff, :status, :doctor, :history and :lightning
+contextrail/cr.py      entry point for hooks, the status line and the status, doctor, history and lightning commands
+contextrail/*.py       usage, facts, handoff, storage, config, prompts, status, doctor, history, lightning and statusline
 mods/                  contextrail-continue, the optional mod that offers a new session after a handoff
 tests/                 unittest suite with synthetic transcripts
 ```

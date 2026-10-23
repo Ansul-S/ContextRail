@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-ContextRail stays out of Claude Code's way: handoffs load whole, scripted runs are left alone, and the companion plugin asks before it starts a new session.
+ContextRail stays out of Claude Code's way: handoffs load whole, scripted runs are left alone, and the companion plugin asks before it starts a new session. Lightning Mode, if you turn it on, starts one on its own at a context size you set.
 
 ### Upgrading
 
@@ -10,6 +10,19 @@ ContextRail stays out of Claude Code's way: handoffs load whole, scripted runs a
 - The default `max_chars` is now 8,000 instead of 12,000. If you set it higher in a `config.json`, a long handoff loads shortened.
 - ContextRail no longer runs in `claude -p` or the Agent SDK. To keep it running there, set `"unattended": true` or `CONTEXTRAIL_UNATTENDED=1`.
 - `contextrail-continue` no longer has the `delay_seconds` and `max_in_a_row` settings, because it now asks every time.
+
+### Lightning Mode
+
+- **A new session at a context size you set:** `/contextrail:lightning 200k` turns it on. At 200k tokens of context, counted in all rather than from the session's start, ContextRail asks for the handoff. Once it is saved, `contextrail-continue` counts down 10 seconds in a blue pane and starts a new session from it. To stay, press n or Esc or send a prompt; text in the prompt box when the countdown ends also keeps the session. A session that starts near the limit still gets 20k tokens of work, and `soft_pct` still caps the limit. `/contextrail:lightning off` turns it off.
+- **One setting for both plugins:** the limit is saved as `lightning_tokens` in `~/.contextrail/config.json`, and `CONTEXTRAIL_LIGHTNING_TOKENS` overrides it. A project's `config.json` can't set it, and `/contextrail:doctor` says so if one tries. `/contextrail:status` shows it.
+- **The Bolt rail:** in Lightning Mode, ContextRail's status line is blue, runs between two ⚡, and ends where the new session starts: `new session at 200k · 48k to go`.
+
+### Triggers and settings
+
+- **The start includes late listings:** Claude Code sometimes attaches its skill, agent and MCP listings after the first reply, about 30k tokens. The start was measured before them, so the handoff came about 30k early. When listings arrive between the first and second reply, the start is now the context at the second reply.
+- **The wrap-up lets the step finish:** the wrap-up warning said "Don't start new work", and agents dropped the commands of the step they were on. It now asks them to finish that step, let running commands finish and show their results, and then stop.
+- **Running tasks go into the handoff:** when ContextRail stops waiting for background tasks at the wrap-up point, the request names the tasks still running and asks for them under In progress, with how to check their results.
+- **Numbers too big for an integer:** a value such as `1e400` in a `config.json` stopped ContextRail from reading its settings, so the hooks did nothing. It is now ignored like any other invalid value, and `/contextrail:doctor` lists it.
 
 ### Loading
 
@@ -21,12 +34,14 @@ ContextRail stays out of Claude Code's way: handoffs load whole, scripted runs a
 
 ### contextrail-continue
 
-- **Asks instead of counting down:** after ContextRail saves a handoff, a pane asks "Press y to start a new Claude Code session. Press n to continue using the current session." and waits for your answer. y clears the session and sends the resume prompt. n or Esc keeps the session. On a terminal narrower than 144 columns, where Claude Code doesn't show a pane it didn't ask for, the same question comes up in Claude Code's question dialog. Sending a prompt, or a new turn starting, withdraws the question. This replaces the 10-second countdown and the limit of 3 continues in a row.
+- **Asks instead of counting down:** after ContextRail saves a handoff, a pane asks "Press y to start a new Claude Code session. Press n to continue using the current session." and waits for your answer. y clears the session and sends the resume prompt. n or Esc keeps the session. On a terminal narrower than 144 columns, where Claude Code doesn't show a pane it didn't ask for, the same question comes up in Claude Code's question dialog. Sending a prompt withdraws the question. This replaces the 10-second countdown and the limit of 3 continues in a row; Lightning Mode brings the countdown back for those who want it.
+- **Waits for background work:** a handoff saved while background or scheduled tasks are running is no longer dropped. A note says the question will come once they finish and the agent has shown their results, and then it does. Only a prompt you send or the end of the session cancels it. A new turn, such as a task's notification, takes an open question back until that turn ends.
 - **Explains "Stop hook error occurred":** when ContextRail asks for a handoff, a toast says the label is ContextRail's request, not a failure.
 
 ### Docs
 
 - The README explains the rail in more detail and notes the "Stop hook error" label.
+- The README describes Lightning Mode, how the session's start is measured, and the new wrap-up.
 
 ## 0.4.0 (2026-10-23)
 

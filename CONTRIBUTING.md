@@ -26,11 +26,13 @@ CONTEXTRAIL_HOME=/tmp/cr-home CONTEXTRAIL_SOFT_TOKENS=1000 claude --plugin-dir /
 
 A low `CONTEXTRAIL_SOFT_TOKENS` makes the handoff request fire on the first turn. Use `/contextrail:status` to see what ContextRail sees, and `/contextrail:doctor` to check the setup.
 
+To try Lightning Mode, set `CONTEXTRAIL_LIGHTNING_TOKENS=60000` instead. The handoff comes at 60k tokens of context, or 20k past the session's start if that is later, and an installed `contextrail-continue` counts down to a new session. The variable overrides `lightning_tokens` in `config.json`, so your own setting stays as it is.
+
 ContextRail does nothing in sessions nobody is watching, so a scripted end-to-end run with `claude -p` also needs `CONTEXTRAIL_UNATTENDED=1`, and `CONTEXTRAIL_COPY_RESUME_PROMPT=0` to leave your clipboard alone.
 
 ## The mod
 
-`mods/contextrail-continue/` is an optional plugin of a newer kind, a TypeScript hooks module (a mod), that asks whether to start a new session after a handoff, and clears and continues on yes. It recognises ContextRail's handoff request by its opening words, and a Python test keeps the two in step. Check it with:
+`mods/contextrail-continue/` is an optional plugin of a newer kind, a TypeScript hooks module (a mod), that asks whether to start a new session after a handoff, and clears and continues on yes. It recognises ContextRail's handoff request by its opening words, and a Python test keeps the two in step. For Lightning Mode it reads `lightning_tokens` itself, the way `contextrail/config.py` does: the environment variable when it holds a usable value, else `config.json` under `CONTEXTRAIL_HOME`. A change to how `config.py` reads numbers needs the same change in `tokensOf` in `register.tsx`, and the mod's tests list the values both must agree on. Check it with:
 
 ```
 claude plugin validate mods/contextrail-continue
