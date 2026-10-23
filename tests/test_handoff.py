@@ -10,6 +10,19 @@ class ExtractTest(unittest.TestCase):
         text = "<contextrail-handoff>old</contextrail-handoff> then <contextrail-handoff>\nnew\n</contextrail-handoff>"
         self.assertEqual(handoff.extract(text), "new")
 
+    def test_a_tag_quoted_inside_the_handoff_does_not_end_it(self):
+        body = (
+            "## Goal\nFix the parser.\n\n## Known facts\n- A stray `</contextrail-handoff>` cut handoffs short; "
+            "so did `<contextrail-handoff>` in prose.\n\n## Resume prompt\nContinue the parser fix."
+        )
+        text = f"Here it is.\n<contextrail-handoff>\n{body}\n</contextrail-handoff>\nWaiting on you."
+        self.assertEqual(handoff.extract(text), body)
+        self.assertEqual(handoff.resume_prompt(handoff.extract(text)), "Continue the parser fix.")
+        self.assertEqual(handoff.extract(text.replace("\n", "\r\n")), body.replace("\n", "\r\n"))
+
+    def test_tags_inside_a_line_still_count_when_none_stand_alone(self):
+        self.assertEqual(handoff.extract("<contextrail-handoff>## Goal\nx</contextrail-handoff>"), "## Goal\nx")
+
     def test_no_block(self):
         self.assertIsNone(handoff.extract("nothing here"))
         self.assertIsNone(handoff.extract(None))

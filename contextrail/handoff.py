@@ -10,6 +10,10 @@ from .facts import MAX_LISTED, Activity, GitState, find_check
 
 TAG = "contextrail-handoff"
 BLOCK_RE = re.compile(r"<contextrail-handoff>\s*(.*?)\s*</contextrail-handoff>", re.S)
+# The same with each tag on a line of its own, so a tag quoted inside the handoff doesn't end it.
+LINE_BLOCK_RE = re.compile(
+    r"^[ \t]*<contextrail-handoff>[ \t\r]*\n(.*?)\n[ \t]*</contextrail-handoff>[ \t\r]*$", re.S | re.M
+)
 HEADING_RE = re.compile(r"^##[ \t]+(.+?)[ \t#]*$", re.M)
 NARRATIVE_MARK = "<!-- contextrail:narrative -->"
 CARRIED_OVER = "_Carried over from the previous handoff"
@@ -64,8 +68,9 @@ CONCRETE_RE = re.compile(
 
 
 def extract(text: Optional[str]) -> Optional[str]:
-    """The last handoff block in a message, without its tags."""
-    matches = BLOCK_RE.findall(text or "")
+    """The last handoff block in a message, without its tags: one whose tags stand on
+    lines of their own if there is one, else any."""
+    matches = LINE_BLOCK_RE.findall(text or "") or BLOCK_RE.findall(text or "")
     return matches[-1].strip() if matches else None
 
 
