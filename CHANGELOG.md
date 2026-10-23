@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+ContextRail stays out of Claude Code's way: handoffs load whole, scripted runs are left alone, and the companion plugin asks before it starts a new session.
+
+### Upgrading
+
+- Update both plugins, then restart Claude Code. `/clear` doesn't reload plugin hooks.
+- The default `max_chars` is now 8,000 instead of 12,000. If you set it higher in a `config.json`, a long handoff loads shortened.
+- ContextRail no longer runs in `claude -p` or the Agent SDK. To keep it running there, set `"unattended": true` or `CONTEXTRAIL_UNATTENDED=1`.
+- `contextrail-continue` no longer has the `delay_seconds` and `max_in_a_row` settings, because it now asks every time.
+
+### Loading
+
+- **Handoffs load whole:** Claude Code puts at most 10,000 characters of a hook's context into the session. Past that, the agent got only a file path and a 2 KB preview, which left out most of the handoff. ContextRail now keeps what it loads under that limit. The new `max_chars` default leaves room for the facts it adds. A longer handoff is shortened in a fixed order: known facts, dead ends, decisions, how to run, done, open questions. Items go from the end of each section, each section keeps its first item as long as it can, and a note says how many were left out and where the full handoff is. `/contextrail:doctor` says when the saved handoff would load shortened.
+
+### Scripted runs
+
+- **Unattended sessions are left alone:** in `claude -p` and the Agent SDK, Claude Code sets `CLAUDE_CODE_SESSION_ATTENDED=0`, and the hooks now do nothing. There is no handoff request holding up the run's end, no handoff loaded into it, and no checkpoint replacing yours. The new `unattended` setting turns them back on. `/contextrail:doctor` warns when it runs in such a session.
+
+### contextrail-continue
+
+- **Asks instead of counting down:** after ContextRail saves a handoff, a pane asks "Press y to start a new Claude Code session. Press n to continue using the current session." and waits for your answer. y clears the session and sends the resume prompt. n or Esc keeps the session. On a terminal narrower than 144 columns, where Claude Code doesn't show a pane it didn't ask for, the same question comes up in Claude Code's question dialog. Sending a prompt, or a new turn starting, withdraws the question. This replaces the 10-second countdown and the limit of 3 continues in a row.
+- **Explains "Stop hook error occurred":** when ContextRail asks for a handoff, a toast says the label is ContextRail's request, not a failure.
+
+### Docs
+
+- The README explains the rail in more detail and notes the "Stop hook error" label.
+
 ## 0.4.0 (2026-10-23)
 
 Handoffs come after a full session's work, not halfway through it.

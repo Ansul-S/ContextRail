@@ -39,13 +39,14 @@ To try it without installing, clone the repository and start Claude Code with `c
 
 Most of the time you do nothing:
 
-- **100k tokens into the session**, counted from its first reply, when the agent finishes a turn, ContextRail asks it for a handoff. The agent replies with it, and ContextRail saves it and tells you.
+- **100k tokens into the session**, counted from its first reply, when the agent finishes a turn, ContextRail asks it for a handoff. The agent replies with it, and ContextRail saves it and tells you. Claude Code labels the request "Stop hook error occurred", because it reaches the agent the way a Stop hook's objection does. Nothing has failed.
 - **If background tasks are still running** (a test run in the background, a subagent), ContextRail waits until they finish, because their results belong in the handoff. It says so once, and stops waiting 130k tokens into the session.
 - **Type `/clear`.** The new session starts with the handoff loaded. Paste the resume prompt from your clipboard, or just say "continue".
 - **If you keep going instead**, ContextRail asks for a fresh handoff every 40k tokens.
 - **130k tokens into the session, in the middle of a long turn**, the agent is told to finish the current step and stop starting new work.
 - **Before compaction**, ContextRail saves the facts and carries over the last narrative, so a compacted session still gets a handoff.
 - **When a session ends without a handoff** (you `/clear` or exit before the request), and it edited files and grew by 30k tokens, ContextRail saves a checkpoint the same way, so the next session still knows where you left off. Claude Code gives this about 1.5 seconds and doesn't run it at all after a crash or a killed terminal, so it is a safety net, not a replacement for the handoff.
+- **Scripted runs are left alone.** In `claude -p` and the Agent SDK nobody is there to type `/clear`, and a handoff written by a script would replace yours, so ContextRail does nothing there. Set `unattended` to `true` to have it run in them too.
 
 Commands:
 
@@ -56,9 +57,20 @@ Commands:
 | `/contextrail:doctor` | Check the setup: Python, the hooks, storage and settings, when each hook last ran, whether usage can be read, and whether the saved handoff would load. `--setup-statusline` sets up the optional status-line wrapper. |
 | `/contextrail:history` | List the saved handoffs, newest first, with each one's first next step. `/contextrail:history --restore N` makes an archived one current again. |
 
-## Hands-free continue (optional)
+## One-key continue (optional)
 
-ContextRail leaves `/clear` to you, because hooks can't run slash commands. The optional `contextrail-continue` plugin does it for you: once ContextRail has asked for a handoff and saved it, the plugin waits 10 seconds, runs `/clear`, and sends the handoff's resume prompt, so the work carries on in a fresh session with the handoff loaded.
+ContextRail leaves `/clear` to you, because hooks can't run slash commands. The optional `contextrail-continue` plugin asks you instead. Once ContextRail has asked for a handoff and saved it, a small pane opens:
+
+```
+ContextRail saved the handoff.
+Press y to start a new Claude Code session. Press n to continue using the current session.
+y: Start a new session   n: Keep this session
+```
+
+- **y** runs `/clear` and sends the handoff's resume prompt, so the work carries on in a fresh session with the handoff loaded.
+- **n**, or Esc, keeps the current session. The handoff stays saved, and `/clear` loads it whenever you are ready.
+
+The question waits for your answer, however long that takes.
 
 ```
 /plugin install contextrail-continue@contextrail
@@ -66,19 +78,17 @@ ContextRail leaves `/clear` to you, because hooks can't run slash commands. The 
 
 It is a mod, a newer kind of Claude Code plugin written in TypeScript. Mods are in early access, so this needs a recent Claude Code; it was tested with 2.1.308. ContextRail itself works without it.
 
-It stays in the current session instead when:
-
-- you start typing during the 10 seconds, or send a prompt;
-- background tasks or scheduled tasks (such as `/loop`) are still pending;
-- it has already continued 3 times in a row without a prompt from you.
+- **Narrow terminals:** Claude Code only shows a pane it didn't ask for in a terminal at least 144 columns wide. In a narrower one, the plugin asks the same question in Claude Code's question dialog.
+- **The keys** work while the pane has the keyboard. It takes the keyboard when the prompt box is empty. If you were typing, press ctrl+x tab to reach it.
+- **The question is withdrawn** when you send a prompt, or a new turn starts (a background task's notification, for example). You stay in the current session.
+- **It doesn't ask** while background or scheduled tasks (such as `/loop`) are still pending.
+- **It explains the label:** when ContextRail asks for a handoff, the plugin shows a note that the "Stop hook error" above is ContextRail's request.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `delay_seconds` | 10 | How long to wait after the handoff is saved. |
-| `max_in_a_row` | 3 | How many times to continue without a prompt from you in between. |
-| `after_manual` | off | Also continue after a handoff you asked for with `/contextrail:handoff`. |
+| `after_manual` | off | Also ask after a handoff you asked for with `/contextrail:handoff`. |
 
-The settings are offered when you install it, and are in `/config` afterwards.
+The setting is offered when you install the plugin, and is in `/config` afterwards.
 
 ## When it triggers, and why
 
@@ -108,16 +118,36 @@ Claude Code tells the status line the window size, but not the hooks. ContextRai
 
 This writes a small launcher to `~/.contextrail/bin/statusline` and prints the `"statusLine"` entry to put in `~/.claude/settings.json`, with your current status line already filled in. ContextRail never edits that file; the agent can add the entry for you if you say yes. The launcher finds the plugin after updates, and if ContextRail is removed it runs your status line on its own.
 
-If you have no status line, ContextRail shows its own: a rail that fills up as the session's context grows.
+### The rail
+
+If you have no status line, the launcher shows ContextRail's own: a rail that fills up as the session's context grows, so you can see at a glance how far the session is from its next handoff.
 
 ```
 ━━━━━━●┄┄┄┄┄┄┄┄┄┄┄┄┄◆┄┄┄  52k · handoff at 150k · 98k to go · 5% of 1M window · Opus 5.5 · my-project
 ```
 
-- `●` is where the session is now and `◆` is the next handoff request. The rail ends at the wrap-up point, 130k past the session's start by default. After a handoff is saved, `◇` marks it and the rail reaches past the next request.
-- The colour goes from green to amber as the handoff gets close, and to red past the wrap-up point.
-- The text after the rail says what ContextRail does next: `handoff at 150k`, `◆ handoff due`, `◆ handoff requested`, `◷ waiting for background tasks`, `✓ saved 3m ago · next at 192k`, or `✗ no handoff written`.
-- On a narrow terminal the project, the model and the window share are left out first. `NO_COLOR` turns the colours off.
+Read it from left to right:
+
+- **The rail** runs from an empty context to the wrap-up point, 130k tokens past the session's start by default. It starts part-filled, because a session never starts empty.
+  - `━` is context already used, and `●` is where the session is now.
+  - `┄` is the room left, and `◆` is where ContextRail will ask for the next handoff.
+  - After a handoff is saved, `◇` marks where it was written, `◆` moves to the next request (40k later by default), and the rail reaches past it.
+- **The token count** is the context the session holds now.
+- **What happens next:**
+
+  | Text | Meaning |
+  | --- | --- |
+  | `handoff at 150k · 98k to go` | Nothing to do yet. |
+  | `◆ handoff due` | The session has passed the request point. The request goes out when the agent next finishes a turn. |
+  | `◷ waiting for background tasks` | The request is due, but tasks are still running, and their results belong in the handoff. |
+  | `◆ handoff requested` | The agent has been asked and is writing it. |
+  | `✓ saved 3m ago · next at 192k` | A handoff is saved. Type `/clear` to continue from it, or keep working until the next request. |
+  | `✗ no handoff written · /contextrail:handoff` | The agent ignored three requests. Ask for one yourself. |
+  | `ContextRail off` | It is turned off for this project. |
+
+- **Then** the share of the window in use, the model and the project.
+
+The rail and the token count are green while there is plenty of room. They turn amber as the handoff gets close and red at the wrap-up point. On a narrow terminal, the project, the model and the window share are left out in that order, then the rail gets shorter. `NO_COLOR` turns the colours off.
 
 To use ContextRail's line in place of your own, leave out the ` -- '…'` part of the launcher command.
 
@@ -136,7 +166,7 @@ Settings are applied in this order, later ones winning:
   "hard_tokens": 130000,
   "window_tokens": null,
   "refresh_tokens": 40000,
-  "max_chars": 12000,
+  "max_chars": 8000,
   "content_checks": true,
   "checkpoint_tokens": 30000,
   "max_attempts": 3,
@@ -144,11 +174,13 @@ Settings are applied in this order, later ones winning:
   "max_age_days": 30,
   "copy_resume_prompt": true,
   "history_keep": 20,
+  "unattended": false,
   "enabled": true
 }
 ```
 
-- `max_chars` caps the part the agent writes, which keeps the handoff to about 3k tokens when it is loaded.
+- `max_chars` caps the part the agent writes, at 8,000 characters (about 2k tokens) by default. Together with the facts ContextRail adds, that fits Claude Code's 10,000-character limit for what a hook loads into a session. A longer handoff loads shortened, with the least important items left out first (known facts, dead ends, decisions) and a pointer to the full file. `/contextrail:doctor` says when that happens.
+- `unattended` lets ContextRail run in sessions nobody is watching, such as `claude -p` and the Agent SDK. It is off by default, so a scripted run neither asks for a handoff nor replaces yours.
 - `content_checks` holds the handoff against what ContextRail recorded before saving it: uncommitted files edited in the session that it never mentions, a Done section with no evidence, a first next step with nothing concrete in it, and a Done item that says a check passed when the facts show it failed. A gap gets the one fix request.
 - `checkpoint_tokens` is how far a session must grow past its start, having edited files, to get a checkpoint when it ends without a handoff.
 - `inject_on` sets which session starts load the handoff (`startup`, `clear`, `compact`, `resume`).
@@ -178,7 +210,7 @@ A project is the git repository root, or the folder itself if it isn't a reposit
 Compaction is a generic summary written at the last moment, and you stay in the same long session. A handoff is written earlier, follows a fixed structure, separates verified from unverified work, and keeps decisions and dead ends that summaries tend to drop. The two work together: ContextRail also saves before compaction and reloads afterwards.
 
 **Why doesn't it run `/clear` itself?**
-Hooks can't run slash commands, and leaving `/clear` to you means you decide when to switch. If you'd rather it switched by itself, install the optional `contextrail-continue` plugin (see Hands-free continue).
+Hooks can't run slash commands, and leaving `/clear` to you means you decide when to switch. If you'd rather switch with one key, install the optional `contextrail-continue` plugin (see One-key continue).
 
 **What if the agent ignores the request?**
 ContextRail asks at most three times per session, then tells you to run `/contextrail:handoff` when you are ready. An incomplete handoff, or one that leaves out what the session's facts show (see `content_checks`), gets one request for a fix. After that it is saved anyway, with a warning.
@@ -218,7 +250,7 @@ hooks/hooks.json       Stop, PostToolUse, PreCompact, SessionStart and SessionEn
 commands/              /contextrail:handoff, :status, :doctor and :history
 contextrail/cr.py      entry point for hooks, the status line and the status, doctor and history commands
 contextrail/*.py       usage, facts, handoff, storage, config, prompts, status, doctor, history and statusline
-mods/                  contextrail-continue, the optional mod that clears and continues
+mods/                  contextrail-continue, the optional mod that offers a new session after a handoff
 tests/                 unittest suite with synthetic transcripts
 ```
 
