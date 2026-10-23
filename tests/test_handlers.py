@@ -32,7 +32,9 @@ class StopTest(TempHome):
         self.assertEqual(out["decision"], "block")
         self.assertIn("102,000 tokens of context", out["reason"])
         self.assertIn("<contextrail-handoff>", out["reason"])
-        self.assertIn("asking for a handoff", out["systemMessage"])
+        # Before the hard point the handoff is a checkpoint: no new session is offered after it.
+        self.assertIn(prompts.CHECKPOINT, out["reason"])
+        self.assertIn("asking for a checkpoint handoff. Work goes on after it", out["systemMessage"])
 
     def test_token_cap_applies_to_large_windows(self):
         self.at_tokens(102_000, model="claude-opus-5-5[1m]")
@@ -101,13 +103,80 @@ class StopTest(TempHome):
         self.assertEqual(meta["tokens"], 102_000)
         self.assertEqual(meta["session_id"], "session-1")
 
-        # Within refresh_tokens of the save: quiet. Past it: ask again.
-        self.at_tokens(130_000)
+        self.assertIn("Keep working: the final handoff and the offer of a new session come at 130,000", out["systemMessage"])
+
+        # Within refresh_tokens of the checkpoint and below the hard point: quiet. At it: the final handoff.
+        self.at_tokens(120_000)
         self.assertIsNone(self.stop(last_assistant_message="ok"))
-        self.at_tokens(143_000)
+        self.at_tokens(130_000)
         out = self.stop(last_assistant_message="ok")
         self.assertEqual(out["decision"], "block")
         self.assertIn("write a fresh one", out["reason"])
+        self.assertIn("This is the final handoff of this session", out["reason"])
+        self.assertNotIn(prompts.CHECKPOINT, out["reason"])
+        self.assertIn("asking for the final handoff", out["systemMessage"])
+        out = self.stop(last_assistant_message=block_message(), stop_hook_active=True)
+        self.assertIn("ContextRail: handoff saved", out["systemMessage"])
+
+        # After the final handoff, every refresh_tokens.
+        self.at_tokens(160_000)
+        self.assertIsNone(self.stop(last_assistant_message="ok"))
+        self.at_tokens(171_000)
+        out = self.stop(last_assistant_message="ok")
+        self.assertIn("This is the final handoff of this session", out["reason"])
+
+    def test_new_session_at_soft_makes_every_handoff_final(self):
+        os.environ["CONTEXTRAIL_NEW_SESSION_AT"] = "soft"
+        self.at_tokens(102_000)
+        out = self.stop(last_assistant_message="ok")
+        self.assertNotIn(prompts.CHECKPOINT, out["reason"])
+        self.assertNotIn("final handoff", out["reason"])
+        self.assertTrue(out["systemMessage"].startswith("ContextRail: context is at 102,000 tokens; asking for a handoff."))
+        self.assertIn("Type /clear to continue", self.stop(last_assistant_message=block_message(), stop_hook_active=True)["systemMessage"])
+        self.at_tokens(130_000)
+        self.assertIsNone(self.stop(last_assistant_message="ok"))
+        self.at_tokens(143_000)
+        self.assertIn("write a fresh one", self.stop(last_assistant_message="ok")["reason"])
+
+    def test_lightning_offers_a_new_session_at_its_own_point(self):
+        os.environ["CONTEXTRAIL_LIGHTNING_TOKENS"] = "60000"
+        self.at_tokens(61_000)
+        out = self.stop(last_assistant_message="ok")
+        self.assertEqual(out["decision"], "block")
+        self.assertNotIn(prompts.CHECKPOINT, out["reason"])
+
+    def test_a_handoff_nobody_asked_for_is_final_past_the_hard_point(self):
+        self.at_tokens(110_000)
+        self.assertIn("checkpoint handoff saved", self.stop(last_assistant_message=block_message())["systemMessage"])
+        self.at_tokens(135_000)
+        self.assertIn("final handoff", self.stop(last_assistant_message="ok")["reason"])
+        self.stop(last_assistant_message=block_message(), stop_hook_active=True)
+        self.at_tokens(140_000)
+        self.stop(last_assistant_message=block_message())
+        entry = store.load_state(self.project())["sessions"]["session-1"]
+        self.assertEqual((entry["saved_kind"], entry["saved_tokens"]), ("final", 140_000))
+        self.assertIsNone(self.stop(last_assistant_message="ok"))
+
+    def test_the_diagnostic_line_says_what_decided(self):
+        os.environ.update(CONTEXTRAIL_WINDOW_TOKENS="1000000", CONTEXTRAIL_SOFT_TOKENS="400000",
+                          CONTEXTRAIL_HARD_TOKENS="550000")
+        self.at_tokens(401_000)
+        self.assertIsNone(self.stop(last_assistant_message="ok"))
+        self.at_tokens(402_000)
+        lines = self.stop(last_assistant_message="ok")["systemMessage"].splitlines()
+        self.assertEqual(lines[1], (
+            "Handoff at 402,000 (start 2,000 + soft_tokens 400,000); wrap-up at 552,000 "
+            "(start + hard_tokens 550,000). Window 1,000,000 tokens, from the window_tokens setting."
+        ))
+        self.assertEqual(len(lines), 2)  # no warning: the window size is known
+
+    def test_an_assumed_window_is_explained(self):
+        os.environ.update(CONTEXTRAIL_SOFT_TOKENS="400000", CONTEXTRAIL_HARD_TOKENS="550000")
+        self.at_tokens(100_000)
+        lines = self.stop(last_assistant_message="ok")["systemMessage"].splitlines()
+        self.assertIn("Handoff at 100,000 (50% of the window, before start 2,000 + soft_tokens 400,000 = 402,000)", lines[1])
+        self.assertTrue(lines[2].startswith("The window size is assumed"), lines)
+        self.assertIn("puts the handoff at 100,000 instead of 402,000", lines[2])
 
     def test_invalid_handoff_gets_one_retry_then_saves_with_warning(self):
         self.at_tokens(102_000)
@@ -169,10 +238,11 @@ class StopTest(TempHome):
         self.at_tokens(102_000)
         out = self.stop(last_assistant_message="ok", background_tasks=[TASK])
         self.assertNotIn("decision", out)
-        self.assertEqual(out["systemMessage"], (
+        self.assertEqual(out["systemMessage"].splitlines()[0], (
             "ContextRail: waiting for 1 background task (`pytest -q`) to finish before asking for a handoff, "
             "at most until 130,000 tokens. Run /contextrail:handoff to write one now."
         ))
+        self.assertIn("Handoff at 100,000", out["systemMessage"])
         self.assertIsNone(self.stop(last_assistant_message="ok", background_tasks=[TASK]))
         # The task finishing wakes the session; that stop asks, and waiting used no attempt.
         out = self.stop(last_assistant_message="ok", background_tasks=[])
@@ -188,6 +258,8 @@ class StopTest(TempHome):
             "with how to check their results.",
             out["reason"],
         )
+        self.assertIn("offers a new session after it, once the background tasks finish.", out["systemMessage"])
+        self.assertIn("Still running: `pytest -q`; nothing is stopped.", out["systemMessage"])
         self.at_tokens(150_000)
         self.assertNotIn("Background tasks", self.stop(last_assistant_message="ok")["reason"])
 
@@ -239,6 +311,19 @@ class StopTest(TempHome):
 class PostToolTest(TempHome):
     def post(self, **extra):
         return handlers.on_post_tool(self.payload("PostToolUse", tool_name="Bash", **extra))
+
+    def test_a_checkpoint_does_not_hold_back_the_wrap_up(self):
+        self.at_tokens(125_000)
+        handlers.on_stop(self.payload("Stop", last_assistant_message=block_message()))
+        self.at_tokens(131_000)
+        self.assertIn("past the wrap-up point", self.post()["hookSpecificOutput"]["additionalContext"])
+
+    def test_with_new_session_at_soft_a_fresh_handoff_holds_back_the_wrap_up(self):
+        os.environ["CONTEXTRAIL_NEW_SESSION_AT"] = "soft"
+        self.at_tokens(125_000)
+        handlers.on_stop(self.payload("Stop", last_assistant_message=block_message()))
+        self.at_tokens(131_000)
+        self.assertIsNone(self.post())
 
     def test_warns_past_the_hard_limit_with_debounce(self):
         self.at_tokens(120_000)

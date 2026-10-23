@@ -39,11 +39,12 @@ To try it without installing, clone the repository and start Claude Code with `c
 
 Most of the time you do nothing:
 
-- **100k tokens into the session**, counted from where it started, when the agent finishes a turn, ContextRail asks it for a handoff. The agent replies with it, and ContextRail saves it and tells you. Claude Code labels the request "Stop hook error occurred", because it reaches the agent the way a Stop hook's objection does. Nothing has failed.
-- **If background tasks are still running** (a test run in the background, a subagent), ContextRail waits until they finish, because their results belong in the handoff. It says so once, and stops waiting 130k tokens into the session. Then the handoff lists the tasks still running, with how to check their results.
-- **Type `/clear`.** The new session starts with the handoff loaded. Paste the resume prompt from your clipboard, or just say "continue".
-- **If you keep going instead**, ContextRail asks for a fresh handoff every 40k tokens.
-- **130k tokens into the session, in the middle of a long turn**, the agent is told to finish the step it is on and not start another: run the commands the step still needs, let running commands finish, and show you their results.
+- **At the handoff point** (by default 100k tokens into the session, counted from where it started), when the agent finishes a turn, ContextRail asks it for a checkpoint handoff. The agent replies with it, and ContextRail saves it and tells you. Work goes on in the same session. Claude Code labels the request "Stop hook error occurred", because it reaches the agent the way a Stop hook's objection does. Nothing has failed.
+- **If background tasks are still running** (a test run in the background, a subagent), ContextRail waits until they finish, because their results belong in the handoff. It says so once, and stops waiting at the wrap-up point. Then the handoff lists the tasks still running, with how to check their results. Nothing is ever stopped to make room for a handoff.
+- **While you keep going**, ContextRail refreshes the checkpoint every 40k tokens.
+- **At the wrap-up point** (by default 130k into the session), in the middle of a long turn, the agent is told to finish the step it is on and not start another: run the commands the step still needs, let running commands finish, and show you their results. When the turn ends, ContextRail asks for the final handoff, and `contextrail-continue` (below) offers a new session.
+- **Type `/clear`** at any time after a handoff is saved. The new session starts with the handoff loaded. Paste the resume prompt from your clipboard, or just say "continue".
+- **Every request says why.** The note ContextRail shows with it gives the handoff and wrap-up points, what set each one (your token settings or a window cap), the window size and where it came from, and any tasks still running.
 - **Before compaction**, ContextRail saves the facts and carries over the last narrative, so a compacted session still gets a handoff.
 - **When a session ends without a handoff** (you `/clear` or exit before the request), and it edited files and grew by 30k tokens, ContextRail saves a checkpoint the same way, so the next session still knows where you left off. Claude Code gives this about 1.5 seconds and doesn't run it at all after a crash or a killed terminal, so it is a safety net, not a replacement for the handoff.
 - **Scripted runs are left alone.** In `claude -p` and the Agent SDK nobody is there to type `/clear`, and a handoff written by a script would replace yours, so ContextRail does nothing there. Set `unattended` to `true` to have it run in them too.
@@ -60,7 +61,7 @@ Commands:
 
 ## One-key continue (optional)
 
-ContextRail leaves `/clear` to you, because hooks can't run slash commands. The optional `contextrail-continue` plugin asks you instead. Once ContextRail has asked for a handoff and saved it, a small pane opens:
+ContextRail leaves `/clear` to you, because hooks can't run slash commands. The optional `contextrail-continue` plugin asks you instead. Once ContextRail has asked for the final handoff at the wrap-up point and saved it, a small pane opens. Checkpoint handoffs before that point get no question, so work goes on undisturbed; set `new_session_at` to `"soft"` to be asked after every handoff instead.
 
 ```
 ContextRail saved the handoff.
@@ -114,21 +115,48 @@ The limit can be written 200k, 0.2M, 200000 or 200,000, and must be at least 10k
 
 ## When it triggers, and why
 
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `soft_tokens` / `soft_pct` | 100,000 / 50% | Ask for a handoff at whichever comes first: this many tokens past the session's start, or this share of the window. |
-| `hard_tokens` / `hard_pct` | 130,000 / 65% | Tell the agent mid-turn to wrap up. Also the longest ContextRail waits for background tasks. |
-| `refresh_tokens` | 40,000 | If you keep working after a handoff, ask again after this much growth. |
+The two points are yours to set, in `~/.contextrail/config.json`, to suit your model, its window and how you work. The defaults are fallbacks for when you set nothing.
 
-Why these numbers:
+| Setting | Fallback | Meaning |
+| --- | --- | --- |
+| `soft_tokens` / `soft_pct` | 100,000 / 50% | The handoff point: this many tokens past the session's start, or this share of the window, whichever comes first. Before the wrap-up point, the handoff is a checkpoint and work goes on. |
+| `hard_tokens` / `hard_pct` | 130,000 / 65% | The wrap-up point, worked out the same way: the agent is told mid-turn to wrap up, ContextRail asks for the final handoff, and a new session is offered. Also the longest ContextRail waits for background tasks. |
+| `new_session_at` | `"hard"` | Where `contextrail-continue` offers a new session: at the wrap-up point, or `"soft"` for after every handoff, as before 0.5.0. Lightning Mode always offers it at its own point. |
+| `refresh_tokens` | 40,000 | While you keep working after a handoff, ask again after this much growth. |
+
+How they combine:
+
+```
+handoff point = min(start + soft_tokens, window × soft_pct %)
+wrap-up point = min(start + hard_tokens, window × hard_pct %), and never before the handoff point
+```
+
+- **Your token settings decide** whenever the window is big enough. The shares are a guard for small windows: they can only bring a point forward, never push it back. To loosen a guard, raise `soft_pct` or `hard_pct` (up to 100).
+- **Each setting can be set on its own.** If you raise only `soft_tokens` past the fallback `hard_tokens`, the wrap-up point follows it, 30,000 later.
+- **Settings are checked.** `soft_tokens` and `hard_tokens` must be above 0, and the shares 1 to 100; an invalid value is ignored. If you set `hard_tokens` yourself and it is not above `soft_tokens`, ContextRail uses `soft_tokens` + 30,000 until you fix it. `/contextrail:doctor` and `/contextrail:status` say so.
+- **`/contextrail:status` shows the result**, with what decided each point.
+
+Examples (starting points to try, not guarantees: no setting keeps a model from making mistakes, and where long sessions start to slip depends on the model and the task):
+
+| Your setup | `config.json` | Handoff and wrap-up, with a 50k start |
+| --- | --- | --- |
+| 200k window, the fallbacks | nothing | 100k and 130k: the shares decide |
+| 1M window, long working sessions | `{"soft_tokens": 400000, "hard_tokens": 550000}` | 450k and 600k |
+| 1M window, shorter sessions | `{"soft_tokens": 150000, "hard_tokens": 200000}` | 200k and 250k |
+| 200k window, more room before the handoff | `{"soft_pct": 60, "hard_pct": 70}` | 120k and 140k |
+| Quick tasks, a fresh session at a fixed size | `/contextrail:lightning 150k` | 150k, then a new session (see Lightning Mode) |
+
+On a 1M window, the large settings only work when ContextRail knows the window size (see below). Otherwise it assumes 200k, and the shares of that bring the handoff to 100k.
+
+Why the fallbacks are what they are:
 
 - **Sessions don't start empty.** Claude Code's system prompt and tools, skills, MCP instructions, `CLAUDE.md` files and the loaded handoff often add up to 30-50k tokens before any work. So the token settings count from the context at the session's first reply, or the first one after compaction. Claude Code sometimes sends its skill, agent and MCP listings only after the first reply, which can add about 30k tokens. Then the start is the context at the second reply. With a 50k start, the handoff comes at about 150k and the wrap-up at 180k. `/contextrail:status` shows the start.
 - **Usable space is smaller than the window.** Claude Code reserves roughly 16% of the window for auto-compaction. 50% of the raw window is about 60% of the space you can actually use.
 - **The agent needs to still be sharp.** Asking at 50% leaves headroom for writing the handoff (3-5k tokens) while the agent is still at its best. Auto-compaction fires around 83%, which is too late for a good summary.
-- **Absolute tokens matter more than percentages.** Quality declines gradually with length, whatever the window size. On a 1M-token window, 50% would mean 500k tokens, far past the point where long sessions get unreliable. That is why the token setting usually decides. On a 200k window the shares decide instead (100k and 130k), so a session still hands off before auto-compaction, wherever it started.
-- **These are starting points, not laws.** Raise them if your sessions hold up longer.
+- **Absolute tokens and shares do different jobs.** Answer quality can decline gradually as a session grows, whatever the window size, but where that starts depends on the model and the task, and nobody has a number that holds for all of them. The fallback token settings are cautious; on a 1M window they decide, well before the 50% share (500k). On a 200k window the shares decide instead (100k and 130k), so a session still hands off before auto-compaction, wherever it started.
+- **These are starting points, not laws.** Raise them if your sessions hold up longer, lower them if they don't.
 
-Context usage is read from the session transcript, the same way Claude Code computes it. Hook payloads do not include the window size. Without the status-line wrapper below, ContextRail assumes 200k unless the model name says `[1m]` or usage has already passed 200k. Several current models have a 1M window without saying so in their name, and then the percentages ContextRail shows are too high. The shares of the assumed 200k then decide, so the handoff comes at 100k whatever the session's start. Set up the wrapper or set `window_tokens` to count from the start on such a model, or if you raise the token settings.
+Context usage is read from the session transcript, the same way Claude Code computes it for `/context`: the context sent with the latest reply. Hook payloads do not include the window size. ContextRail takes it from `window_tokens` if set, else from the status-line wrapper below, else from a `[1m]` in the model name, else from usage that has already passed 200k. Failing all of those it assumes 200k. Several current models have a 1M window without saying so in their name. With an assumed window, `/contextrail:doctor` warns, and the note with each request and `/contextrail:status` say how far the 50% share moved the handoff, for example "Its 50% cap puts the handoff at 100,000 instead of 450,000". Set up the wrapper or set `window_tokens` to fix it.
 
 ### Exact window size (optional)
 
@@ -185,7 +213,10 @@ Settings are applied in this order, later ones winning:
 ```json
 {
   "soft_tokens": 100000,
+  "soft_pct": 50,
   "hard_tokens": 130000,
+  "hard_pct": 65,
+  "new_session_at": "hard",
   "window_tokens": null,
   "refresh_tokens": 40000,
   "max_chars": 8000,
@@ -202,7 +233,8 @@ Settings are applied in this order, later ones winning:
 }
 ```
 
-- `max_chars` caps the part the agent writes, at 8,000 characters (about 2k tokens) by default. Together with the facts ContextRail adds, that fits Claude Code's 10,000-character limit for what a hook loads into a session. A longer handoff loads shortened, with the least important items left out first (known facts, dead ends, decisions) and a pointer to the full file. `/contextrail:doctor` says when that happens.
+- `soft_tokens`, `soft_pct`, `hard_tokens`, `hard_pct` and `new_session_at` are explained in When it triggers, and why. `window_tokens` sets the window size when ContextRail can't detect it.
+- `max_chars` caps the part the agent writes, at 8,000 characters (about 2k tokens) by default. [docs/eval.md](docs/eval.md) compares it with 6,000 on real sessions. Together with the facts ContextRail adds, that fits Claude Code's 10,000-character limit for what a hook loads into a session. A longer handoff loads shortened, with the least important items left out first (known facts, dead ends, decisions) and a pointer to the full file. `/contextrail:doctor` says when that happens.
 - `unattended` lets ContextRail run in sessions nobody is watching, such as `claude -p` and the Agent SDK. It is off by default, so a scripted run neither asks for a handoff nor replaces yours.
 - `content_checks` holds the handoff against what ContextRail recorded before saving it: uncommitted files edited in the session that it never mentions, a Done section with no evidence, a first next step with nothing concrete in it, and a Done item that says a check passed when the facts show it failed. A gap gets the one fix request.
 - `checkpoint_tokens` is how far a session must grow past its start, having edited files, to get a checkpoint when it ends without a handoff.
@@ -274,8 +306,10 @@ hooks/hooks.json       Stop, PostToolUse, PreCompact, SessionStart and SessionEn
 commands/              /contextrail:handoff, :status, :doctor, :history and :lightning
 contextrail/cr.py      entry point for hooks, the status line and the status, doctor, history and lightning commands
 contextrail/*.py       usage, facts, handoff, storage, config, prompts, status, doctor, history, lightning and statusline
-mods/                  contextrail-continue, the optional mod that offers a new session after a handoff
+mods/                  contextrail-continue, the optional mod that offers a new session after the final handoff
 tests/                 unittest suite with synthetic transcripts
+tools/eval/            handoff evaluation on real sessions (development only; uses Claude Code quota)
+docs/eval.md           how the evaluation works, and its latest numbers
 ```
 
 ## License

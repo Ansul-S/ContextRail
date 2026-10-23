@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Tuple
 
 from . import __version__, config, facts, handlers, prompts, statusline, store
 from .config import tilde
-from .usage import REPORT_FRESH, claude_projects, last_usage, transcripts
+from .usage import REPORT_FRESH, claude_projects, last_usage, start_tokens, transcripts
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 ISSUES_URL = "https://github.com/Ansul-S/ContextRail/issues"
@@ -214,12 +214,18 @@ def check_transcript(cwd: Path, cfg: Dict[str, Any]) -> Result:
         )
     for path in found:
         usage = last_usage(str(path), cfg["window_tokens"])
-        if usage is not None:
-            return Result(
-                "ok",
-                "Transcript",
-                f"{usage.describe()}, {where}. Window size from {WINDOW_SOURCES[usage.window_source]}",
+        if usage is None:
+            continue
+        detail = f"{usage.describe()}, {where}. Window size from {WINDOW_SOURCES[usage.window_source]}"
+        if usage.window_source != "assumed":
+            return Result("ok", "Transcript", detail)
+        limits = config.thresholds(cfg, usage.window, start_tokens(str(path)) or 0)
+        if limits.soft < limits.soft_wanted:
+            detail += (
+                f". With the assumed size, the {cfg['soft_pct']}% cap puts the handoff at {limits.soft:,} "
+                f"instead of {limits.soft_wanted:,}"
             )
+        return Result("warn", "Transcript", detail)
     if len(found) == 1:
         return Result("warn", "Transcript", "the only session found has no token usage yet")
     return Result(

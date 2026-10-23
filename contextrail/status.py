@@ -34,6 +34,15 @@ def main(args: List[str]) -> int:
         f"Triggers:  handoff at {limits.soft:,} tokens, wrap-up at {limits.hard:,}, "
         f"then again every {cfg['refresh_tokens']:,}"
     )
+    if config.splits(cfg):
+        print("Sessions:  a new session is offered at the wrap-up point; handoffs before it are checkpoints")
+    else:
+        print("Sessions:  a new session is offered after every handoff")
+    if usage:
+        why = config.explain(cfg, limits, usage.window, usage.window_source, start)
+        print(f"Why:       {why[0]}")
+        for line in why[1:]:
+            print(f"Warning:   {line}")
     if cfg["lightning_tokens"]:
         print(f"Lightning: on at {cfg['lightning_tokens']:,}: a new session starts after the handoff (/contextrail:lightning)")
     errors = doctor.recent_errors(doctor.DAY)

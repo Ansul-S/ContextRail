@@ -32,7 +32,7 @@ ContextRail does nothing in sessions nobody is watching, so a scripted end-to-en
 
 ## The mod
 
-`mods/contextrail-continue/` is an optional plugin of a newer kind, a TypeScript hooks module (a mod), that asks whether to start a new session after a handoff, and clears and continues on yes. It recognises ContextRail's handoff request by its opening words, and a Python test keeps the two in step. For Lightning Mode it reads `lightning_tokens` itself, the way `contextrail/config.py` does: the environment variable when it holds a usable value, else `config.json` under `CONTEXTRAIL_HOME`. A change to how `config.py` reads numbers needs the same change in `tokensOf` in `register.tsx`, and the mod's tests list the values both must agree on. Check it with:
+`mods/contextrail-continue/` is an optional plugin of a newer kind, a TypeScript hooks module (a mod), that asks whether to start a new session after a handoff, and clears and continues on yes. It recognises ContextRail's handoff request by its opening words, and a checkpoint request by `prompts.CHECKPOINT`, after which it offers no new session; Python tests keep both in step. For Lightning Mode it reads `lightning_tokens` itself, the way `contextrail/config.py` does: the environment variable when it holds a usable value, else `config.json` under `CONTEXTRAIL_HOME`. A change to how `config.py` reads numbers needs the same change in `tokensOf` in `register.tsx`, and the mod's tests list the values both must agree on. Check it with:
 
 ```
 claude plugin validate mods/contextrail-continue
@@ -42,3 +42,7 @@ claude plugin test mods/contextrail-continue
 ## Changing the prompt
 
 `contextrail/prompts.py` holds the text sent to the agent. `commands/handoff.md` repeats the template and rules, and a test checks that the two match.
+
+## Measuring handoffs
+
+`tools/eval/` regenerates real handoffs at different `max_chars` caps and judges them against what the next session needed; [docs/eval.md](docs/eval.md) explains the method. It calls `claude -p`, so a run uses your Claude Code quota (the 0.5.0 run, 36 calls, was about $41 as Claude Code reports cost). Start with `python3 -m tools.eval cases`, then `run --dry-run`. Its tests, in `tests/test_eval.py`, use a fake `claude` and call no model.

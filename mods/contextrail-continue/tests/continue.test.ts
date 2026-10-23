@@ -120,6 +120,37 @@ test('asks in a pane once ContextRail asked and saved, and y clears and continue
   await ui.unmount()
 })
 
+test('a checkpoint handoff offers no new session, and the final one does', async ($, on) => {
+  const { clock, seen, world } = engine(on)
+  world.stopAnswer = { block: `${REQUEST} This handoff is a checkpoint: work goes on in this session after it.` }
+  await stop($, 'Done with the refactor.')
+  world.stopAnswer = {}
+  await stop($, HANDOFF)
+  await clock.advance(600_000)
+  expect(seen.opened).toEqual([])
+  expect(seen.asked).toEqual([])
+  expect(seen.commands).toEqual([])
+  expect(seen.prompts).toEqual([])
+
+  await requestThenSave($, world)
+  await clock.advance(500)
+  expect(seen.opened).toEqual(['contextrail-continue'])
+})
+
+test('a handoff that quotes its closing tag keeps its resume prompt', async ($, on) => {
+  const { clock, seen, world } = engine(on)
+  world.stopAnswer = { block: REQUEST }
+  await stop($, 'ok')
+  world.stopAnswer = {}
+  await stop($, HANDOFF.replace('Ship the limiter.', 'Ship the limiter. A stray `</contextrail-handoff>` cut handoffs short.'))
+  await clock.advance(500)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'yes' })
+  await clock.settle()
+  expect(seen.prompts).toEqual([RESUME])
+  await ui.unmount()
+})
+
 test('n keeps the session and says how to continue later', async ($, on) => {
   const { clock, seen, world } = engine(on)
   await requestThenSave($, world)

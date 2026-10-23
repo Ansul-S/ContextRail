@@ -143,10 +143,18 @@ class DoctorTest(TempHome):
 
         self.session("old.jsonl", [user(), assistant(50_000)])
         transcript = self.results()["Transcript"]
-        self.assertEqual(transcript.status, "ok")
+        self.assertEqual(transcript.status, "warn")  # the window size is only assumed
         self.assertIn("50,000 tokens of context", transcript.detail)
         self.assertIn("latest session in this folder", transcript.detail)
         self.assertIn("window size from the 200k default", transcript.detail.lower())
+        # The only reply is the start, so the fallback soft_tokens would hand off at 150,000.
+        self.assertIn("the 50% cap puts the handoff at 100,000 instead of 150,000", transcript.detail)
+
+        with mock.patch.dict(os.environ, {"CONTEXTRAIL_SOFT_TOKENS": "400000", "CONTEXTRAIL_HARD_TOKENS": "550000"}):
+            detail = self.results()["Transcript"].detail
+        self.assertIn("the 50% cap puts the handoff at 100,000 instead of 450,000", detail)
+        with mock.patch.dict(os.environ, {"CONTEXTRAIL_WINDOW_TOKENS": "1000000"}):
+            self.assertEqual(self.results()["Transcript"].status, "ok")
 
         other = self.tmp / "other"
         other.mkdir()

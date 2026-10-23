@@ -56,8 +56,13 @@ RULES = """- Be specific and brief: file paths, function names, commands, number
 - Stay under {max_chars:,} characters. Git state, edited files and test commands are recorded automatically, so don't repeat them."""
 
 
-def request(usage_line: str, max_chars: int, refresh: bool, running: str = "") -> str:
-    """running: the background tasks still in flight, as the user would recognise them."""
+# mods/contextrail-continue offers no new session after a request with these words; a test keeps them in step.
+CHECKPOINT = "This handoff is a checkpoint:"
+
+
+def request(usage_line: str, max_chars: int, refresh: bool, running: str = "", kind: str = "") -> str:
+    """running: the background tasks still in flight, as the user would recognise them.
+    kind: "checkpoint" before the hard point, "final" at it, "" when every handoff is final."""
     # mods/contextrail-continue recognises the request by its first words; a test keeps them in step.
     opening = (
         f"ContextRail: this session is at {usage_line}. "
@@ -66,6 +71,10 @@ def request(usage_line: str, max_chars: int, refresh: bool, running: str = "") -
     )
     if refresh:
         opening += " Context has grown a lot since the last handoff, so write a fresh one."
+    if kind == "checkpoint":
+        opening += f" {CHECKPOINT} work goes on in this session after it, and ContextRail asks for a final one later."
+    elif kind == "final":
+        opening += " This is the final handoff of this session: the user is offered a new session that starts from it."
     if running:
         opening += (
             f" Background tasks are still running ({running}): list them under In progress, "

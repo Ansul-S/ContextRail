@@ -6,19 +6,24 @@ from __future__ import annotations
 import difflib
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 DEFAULTS: Dict[str, Any] = {
     "enabled": True,
-    # Ask for a handoff once the session has grown by soft_tokens since its start
-    # (the context at its first reply), or context reaches soft_pct of the window.
+    # Fallbacks for people who set none. Ask for a handoff once the session has grown by
+    # soft_tokens since its start (the context at its first reply), or context reaches
+    # soft_pct of the window, whichever comes first.
     "soft_tokens": 100_000,
     "soft_pct": 50,
-    # The same pair for telling the agent mid-turn to wrap up.
+    # The same pair for the final handoff: the agent is told mid-turn to wrap up, and
+    # contextrail-continue offers a new session after it. Must be above soft_tokens.
     "hard_tokens": 130_000,
     "hard_pct": 65,
+    # Where contextrail-continue offers a new session: "hard", or "soft" to offer it after
+    # every handoff. Before the hard point, a handoff is a checkpoint and work goes on.
+    "new_session_at": "hard",
     # Context window in tokens. None means detect (see usage.resolve_window).
     "window_tokens": None,
     # After a handoff is saved, ask again once context has grown by this much.
@@ -49,6 +54,11 @@ DEFAULTS: Dict[str, Any] = {
 GLOBAL_ONLY = {"lightning_tokens"}
 # In Lightning Mode, a session that starts near the limit still gets this much work.
 LIGHTNING_MIN_WORK = 20_000
+# Settings that must be above zero, and settings with a fixed set of values.
+POSITIVE = {"soft_tokens", "hard_tokens", "soft_pct", "hard_pct"}
+CHOICES = {"new_session_at": ("hard", "soft")}
+# hard_tokens when it is not above soft_tokens: unset, or set wrong.
+HARD_GAP = DEFAULTS["hard_tokens"] - DEFAULTS["soft_tokens"]
 
 ENV_PREFIX = "CONTEXTRAIL_"
 # Environment variables with the prefix that are not settings.
@@ -97,9 +107,14 @@ def _coerce(key: str, value: Any) -> Any:
         if isinstance(value, bool):
             raise ValueError(key)
         number = int(value)
-        if number < 0 or (key.endswith("_pct") and number > 100):
+        if number < 0 or (key in POSITIVE and number == 0) or (key.endswith("_pct") and number > 100):
             raise ValueError(key)
         return number
+    if key in CHOICES:
+        text = str(value).strip().lower()
+        if text not in CHOICES[key]:
+            raise ValueError(key)
+        return text
     if isinstance(default, list):
         if isinstance(value, str):
             value = [part.strip() for part in value.split(",") if part.strip()]
@@ -109,7 +124,9 @@ def _coerce(key: str, value: Any) -> Any:
     return value
 
 
-def _merge(cfg: Dict[str, Any], updates: Dict[str, Any]) -> None:
+def _merge(cfg: Dict[str, Any], updates: Dict[str, Any]) -> List[str]:
+    """Apply the valid settings in updates, and return their keys."""
+    applied = []
     for key, value in updates.items():
         if key not in DEFAULTS:
             continue
@@ -117,6 +134,8 @@ def _merge(cfg: Dict[str, Any], updates: Dict[str, Any]) -> None:
             cfg[key] = _coerce(key, value)
         except (TypeError, ValueError, OverflowError):
             continue  # a bad value keeps the previous one
+        applied.append(key)
+    return applied
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -127,21 +146,36 @@ def _read_json(path: Path) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def load(project_dir: Optional[Path] = None) -> Dict[str, Any]:
+def _merged(project_dir: Optional[Path]) -> Tuple[Dict[str, Any], List[str]]:
+    """The settings from every source in order, and the keys any of them set."""
     cfg = dict(DEFAULTS)
-    _merge(cfg, _read_json(home() / "config.json"))
+    applied = _merge(cfg, _read_json(home() / "config.json"))
     if project_dir is not None:
         local = _read_json(project_dir / "config.json")
-        _merge(cfg, {key: value for key, value in local.items() if key not in GLOBAL_ONLY})
+        applied += _merge(cfg, {key: value for key, value in local.items() if key not in GLOBAL_ONLY})
     env = {
         key: os.environ[ENV_PREFIX + key.upper()]
         for key in DEFAULTS
         if ENV_PREFIX + key.upper() in os.environ
     }
-    _merge(cfg, env)
+    applied += _merge(cfg, env)
+    return cfg, applied
+
+
+def load(project_dir: Optional[Path] = None) -> Dict[str, Any]:
+    cfg, _ = _merged(project_dir)
+    if cfg["hard_tokens"] <= cfg["soft_tokens"]:
+        # Unset, the fallback can sit below a raised soft_tokens; set, it is reported by problems().
+        cfg["hard_tokens"] = cfg["soft_tokens"] + HARD_GAP
     if os.environ.get("CONTEXTRAIL_DISABLE", "").strip().lower() in ("1", "true", "yes"):
         cfg["enabled"] = False
     return cfg
+
+
+def splits(cfg: Dict[str, Any]) -> bool:
+    """Whether a handoff before the hard point is a checkpoint, with no new session offered.
+    Lightning Mode always offers one at its own point."""
+    return cfg["new_session_at"] == "hard" and not cfg["lightning_tokens"]
 
 
 def attended() -> bool:
@@ -199,6 +233,12 @@ def problems(project_dir: Optional[Path] = None) -> List[str]:
         if name.startswith(ENV_PREFIX) and name not in ENV_ONLY
     }
     found += [f"{ENV_PREFIX}{key.upper()} {problem}" for key, problem in _invalid(env)]
+    cfg, applied = _merged(project_dir)
+    if "hard_tokens" in applied and cfg["hard_tokens"] <= cfg["soft_tokens"]:
+        found.append(
+            f"hard_tokens ({cfg['hard_tokens']:,}) must be above soft_tokens ({cfg['soft_tokens']:,}); "
+            f"ContextRail uses {cfg['soft_tokens'] + HARD_GAP:,} until it is"
+        )
     return found
 
 
@@ -206,6 +246,11 @@ def problems(project_dir: Optional[Path] = None) -> List[str]:
 class Thresholds:
     soft: int
     hard: int
+    # Each point before the window caps, and the caps, for explaining which one decided.
+    soft_wanted: int = field(default=0, compare=False)
+    hard_wanted: int = field(default=0, compare=False)
+    soft_cap: int = field(default=0, compare=False)
+    hard_cap: int = field(default=0, compare=False)
 
 
 def thresholds(cfg: Dict[str, Any], window: int, start: int = 0) -> Thresholds:
@@ -214,10 +259,62 @@ def thresholds(cfg: Dict[str, Any], window: int, start: int = 0) -> Thresholds:
     so a small window still hands off before auto-compaction. In Lightning Mode the handoff
     comes at the Lightning size instead, which counts the whole context."""
     lightning = cfg["lightning_tokens"]
+    soft_cap, hard_cap = window * cfg["soft_pct"] // 100, window * cfg["hard_pct"] // 100
     if lightning:
-        soft = min(max(lightning, start + LIGHTNING_MIN_WORK), window * cfg["soft_pct"] // 100)
-        hard = min(soft + cfg["hard_tokens"] - cfg["soft_tokens"], window * cfg["hard_pct"] // 100)
+        soft_wanted = max(lightning, start + LIGHTNING_MIN_WORK)
+        soft = min(soft_wanted, soft_cap)
+        hard_wanted = soft + cfg["hard_tokens"] - cfg["soft_tokens"]
     else:
-        soft = min(start + cfg["soft_tokens"], window * cfg["soft_pct"] // 100)
-        hard = min(start + cfg["hard_tokens"], window * cfg["hard_pct"] // 100)
-    return Thresholds(soft=soft, hard=max(hard, soft))
+        soft_wanted = start + cfg["soft_tokens"]
+        soft = min(soft_wanted, soft_cap)
+        hard_wanted = start + cfg["hard_tokens"]
+    hard = max(min(hard_wanted, hard_cap), soft)
+    return Thresholds(soft, hard, soft_wanted, hard_wanted, soft_cap, hard_cap)
+
+
+# Where the window size came from (usage.resolve_window), as the diagnostic line says it.
+WINDOW_FROM = {
+    "config": "the window_tokens setting",
+    "statusline": "the status line",
+    "model": "the model name",
+    "observed": "usage above 200k",
+    "assumed": "an assumption",
+}
+
+
+def _point(name: str, value: int, wanted: int, cap: int, pct: int, how: str) -> str:
+    if value > min(wanted, cap):
+        return f"{name} {value:,} (no earlier than the handoff)"
+    if value < wanted:
+        return f"{name} {value:,} ({pct}% of the window, before {how} = {wanted:,})"
+    return f"{name} {value:,} ({how})"
+
+
+def explain(cfg: Dict[str, Any], limits: Thresholds, window: int, source: str, start: int) -> List[str]:
+    """Why the handoff and wrap-up points are where they are, and a warning when the
+    window size is assumed. Numbers and setting names only."""
+    if cfg["lightning_tokens"]:
+        soft_how = f"lightning_tokens {cfg['lightning_tokens']:,}"
+        if limits.soft_wanted > cfg["lightning_tokens"]:
+            soft_how = f"start {start:,} + {LIGHTNING_MIN_WORK:,}"
+        hard_how = f"handoff + {cfg['hard_tokens'] - cfg['soft_tokens']:,}"
+    else:
+        soft_how = f"start {start:,} + soft_tokens {cfg['soft_tokens']:,}"
+        hard_how = f"start + hard_tokens {cfg['hard_tokens']:,}"
+    lines = [
+        _point("Handoff at", limits.soft, limits.soft_wanted, limits.soft_cap, cfg["soft_pct"], soft_how)
+        + "; "
+        + _point("wrap-up at", limits.hard, limits.hard_wanted, limits.hard_cap, cfg["hard_pct"], hard_how)
+        + f". Window {window:,} tokens, from {WINDOW_FROM.get(source, source)}."
+    ]
+    if source == "assumed":
+        moved = (
+            f" Its {cfg['soft_pct']}% cap puts the handoff at {limits.soft:,} instead of {limits.soft_wanted:,}."
+            if limits.soft < limits.soft_wanted
+            else f" The {cfg['soft_pct']}% and {cfg['hard_pct']}% caps are shares of this assumed size."
+        )
+        lines.append(
+            f"The window size is assumed: no status-line report and no window_tokens setting.{moved} "
+            "Run /contextrail:doctor --setup-statusline, or set window_tokens in ~/.contextrail/config.json."
+        )
+    return lines

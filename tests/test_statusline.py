@@ -171,6 +171,9 @@ class StatusLineTest(TempHome):
         self.set_session(saved_tokens=140_000)
         self.assertTrue(self.line_at(140_000).startswith("━━━━━━━━━━━━━━━━●┄┄┄◆┄┄┄  140k · ✓ saved · next at 180k"))
         self.assertTrue(self.line_at(160_000).startswith("━━━━━━━━━━━━━━━━◇━●┄◆┄┄┄  160k · ✓ saved · next at 180k"))
+        # After a checkpoint, the final handoff is asked for at the wrap-up point, before saved + refresh.
+        self.set_session(saved_tokens=110_000, saved_kind="checkpoint")
+        self.assertIn("110k · ✓ saved · next at 130k", self.line_at(110_000))
 
     def test_parts_drop_out_on_narrow_terminals(self):
         expected = {

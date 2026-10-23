@@ -199,13 +199,25 @@ def _receive(
     usage = last_usage(payload.get("transcript_path"), cfg["window_tokens"])
     notes = [f"Saved with problems: {'; '.join(issues)}."] if issues else []
     resume = _save(project, root, cfg, payload, usage, recorded, body, notes)
+    limits = config.thresholds(cfg, usage.window, _start(entry, payload)) if usage else None
+    kind = entry["asked_kind"]
+    if kind is None:  # a handoff nobody asked for counts as final from the hard point on
+        kind = "final" if limits and usage and usage.tokens >= limits.hard else "checkpoint"
     entry.update(
-        attempts=0, retries=0, saved_tokens=usage.tokens if usage else 0, warned_tokens=None, gave_up=False
+        attempts=0, retries=0, saved_tokens=usage.tokens if usage else 0, warned_tokens=None, gave_up=False,
+        asked_kind=None, saved_kind=kind,
     )
-    message = (
-        f"ContextRail: handoff saved to {tilde(project.handoff)}. Type /clear to continue in a "
-        "fresh session; the handoff loads automatically."
-    )
+    if config.splits(cfg) and kind == "checkpoint":
+        later = f" at {limits.hard:,} tokens" if limits else " at the wrap-up point"
+        message = (
+            f"ContextRail: checkpoint handoff saved to {tilde(project.handoff)}. Keep working: the final "
+            f"handoff and the offer of a new session come{later}. Type /clear to continue from this one sooner."
+        )
+    else:
+        message = (
+            f"ContextRail: handoff saved to {tilde(project.handoff)}. Type /clear to continue in a "
+            "fresh session; the handoff loads automatically."
+        )
     if resume and cfg["copy_resume_prompt"] and copy_to_clipboard(resume):
         message += " The resume prompt is on your clipboard."
     if issues:
@@ -219,9 +231,16 @@ def _maybe_request(payload: Payload, cfg: Dict[str, Any], entry: Dict[str, Any])
     usage = last_usage(payload.get("transcript_path"), cfg["window_tokens"])
     if usage is None:
         return None
-    limits = config.thresholds(cfg, usage.window, _start(entry, payload))
+    start = _start(entry, payload)
+    limits = config.thresholds(cfg, usage.window, start)
+    if usage.tokens < limits.soft:
+        return None
+    split = config.splits(cfg)
+    kind = "checkpoint" if split and usage.tokens < limits.hard else "final"
     saved = entry["saved_tokens"]
-    if usage.tokens < limits.soft or (saved is not None and usage.tokens < saved + cfg["refresh_tokens"]):
+    # Past the hard point, a checkpoint saved since doesn't stand in for the final handoff.
+    final_due = split and kind == "final" and entry["saved_kind"] == "checkpoint"
+    if saved is not None and usage.tokens < saved + cfg["refresh_tokens"] and not final_due:
         return None
     if entry["attempts"] >= cfg["max_attempts"]:
         if entry["gave_up"]:
@@ -234,22 +253,47 @@ def _maybe_request(payload: Payload, cfg: Dict[str, Any], entry: Dict[str, Any])
             )
         }
     running = _in_flight(payload.get("background_tasks"))
+    why = config.explain(cfg, limits, usage.window, usage.window_source, start)
     if running and usage.tokens < limits.hard:
         # Their results would change what the handoff says, and finishing wakes the session,
         # whose next stop asks. The hard limit caps the wait.
         if entry["deferred_notice"]:
             return None
         entry["deferred_notice"] = True
-        return {"systemMessage": _waiting(running, limits.hard)}
+        return {"systemMessage": "\n".join([_waiting(running, limits.hard), *why])}
     entry["attempts"] += 1
     entry["retries"] = 0
+    entry["asked_kind"] = kind
     return {
         "decision": "block",
         "reason": prompts.request(
-            usage.describe(), cfg["max_chars"], refresh=saved is not None, running=_labels(running)
+            usage.describe(), cfg["max_chars"], refresh=saved is not None, running=_labels(running),
+            kind=kind if split else "",
         ),
-        "systemMessage": f"ContextRail: context is at {usage.tokens:,} tokens; asking for a handoff.",
+        "systemMessage": "\n".join([_asking(usage.tokens, kind if split else "", limits, saved, running), *why]),
     }
+
+
+def _asking(tokens: int, kind: str, limits: config.Thresholds, saved: Optional[int], running: List[Dict[str, Any]]) -> str:
+    """What the request is for, and what happens after it, for the person."""
+    if kind == "checkpoint":
+        text = (
+            f"ContextRail: context is at {tokens:,} tokens; asking for a checkpoint handoff. Work goes on after it; "
+            f"the final handoff and the offer of a new session come at {limits.hard:,}."
+        )
+    elif kind == "final":
+        text = (
+            f"ContextRail: context is at {tokens:,} tokens, past the wrap-up point; asking for the final handoff. "
+            "contextrail-continue, if installed, offers a new session after it"
+            + (", once the background tasks finish." if running else ".")
+        )
+    else:
+        text = f"ContextRail: context is at {tokens:,} tokens; asking for a handoff."
+    if saved is not None:
+        text += f" The last handoff was saved at {saved:,}."
+    if running:
+        text += f" Still running: {_labels(running)}; nothing is stopped."
+    return text
 
 
 def _in_flight(tasks: Any) -> List[Dict[str, Any]]:
@@ -295,7 +339,8 @@ def on_post_tool(payload: Payload) -> Output:
         if usage.tokens < config.thresholds(cfg, usage.window, _start(entry, payload)).hard:
             return None
         saved, warned = entry["saved_tokens"], entry["warned_tokens"]
-        if saved is not None and usage.tokens < saved + cfg["refresh_tokens"]:
+        final_due = config.splits(cfg) and entry["saved_kind"] == "checkpoint"
+        if saved is not None and usage.tokens < saved + cfg["refresh_tokens"] and not final_due:
             return None
         if warned is not None and usage.tokens < warned + WARN_EVERY_TOKENS:
             return None
@@ -322,7 +367,10 @@ def on_pre_compact(payload: Payload) -> Output:
         fresh = saved is not None and usage is not None and usage.tokens < saved + cfg["refresh_tokens"]
         # Context starts small again after compaction, so the next request is due at the soft limit,
         # counted from the first reply after it.
-        entry.update(attempts=0, retries=0, saved_tokens=None, warned_tokens=None, gave_up=False, start_tokens=None)
+        entry.update(
+            attempts=0, retries=0, saved_tokens=None, warned_tokens=None, gave_up=False, start_tokens=None,
+            asked_kind=None, saved_kind=None,
+        )
         entry["updated"] = time.time()
         store.save_state(project, state)
         if fresh:

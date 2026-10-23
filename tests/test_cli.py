@@ -48,9 +48,14 @@ class CliTest(TempHome):
         self.assertIn(f"Project:   {self.repo}", result.stdout)
         self.assertIn("Start:     2,000 tokens before any work; the token triggers count from there", result.stdout)
         self.assertIn("Triggers:  handoff at 100,000 tokens, wrap-up at 130,000", result.stdout)
+        self.assertIn("Sessions:  a new session is offered at the wrap-up point; handoffs before it are checkpoints", result.stdout)
+        self.assertIn("Why:       Handoff at 100,000 (50% of the window, before start 2,000 + soft_tokens 100,000 = 102,000)", result.stdout)
+        self.assertIn("Warning:   The window size is assumed", result.stdout)
         self.at_tokens(60_000, model="claude-opus-5-5[1m]", start=50_522)
         result = self.run_cr("status", str(self.repo))
         self.assertIn("Triggers:  handoff at 150,522 tokens, wrap-up at 180,522", result.stdout)
+        self.assertIn("Why:       Handoff at 150,522 (start 50,522 + soft_tokens 100,000)", result.stdout)
+        self.assertNotIn("Warning:", result.stdout)
         self.assertIn("Handoff:   saved just now", result.stdout)
 
     def test_status_points_at_doctor_after_errors(self):
@@ -118,6 +123,14 @@ class PluginFilesTest(TempHome):
         self.assertEqual(entry["name"], "contextrail-continue")
         self.assertTrue((ROOT / entry["source"] / ".claude-plugin/plugin.json").is_file())
         self.assertEqual(json.loads((ROOT / entry["source"] / "hooks/hooks.json").read_text()), {"modules": ["./register.tsx"]})
+
+    def test_mod_knows_a_checkpoint_request(self):
+        register = (ROOT / "mods" / "contextrail-continue" / "hooks" / "register.tsx").read_text()
+        words = register.split("const CHECKPOINT = '")[1].split("'")[0]
+        self.assertEqual(words, prompts.CHECKPOINT)
+        self.assertIn(words, prompts.request("x tokens", 8_000, refresh=False, kind="checkpoint"))
+        for kind in ("final", ""):
+            self.assertNotIn(words, prompts.request("x tokens", 8_000, refresh=False, kind=kind))
 
     def test_mod_reads_the_request_prefix_contextrail_sends(self):
         register = (ROOT / "mods/contextrail-continue/hooks/register.tsx").read_text()

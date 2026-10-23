@@ -81,6 +81,9 @@ def session(state: Dict[str, Any], session_id: str) -> Dict[str, Any]:
     entry.setdefault("gave_up", False)
     entry.setdefault("deferred_notice", False)
     entry.setdefault("start_tokens", None)
+    # "checkpoint" or "final": the kind of the latest request, and of the handoff saved for it.
+    entry.setdefault("asked_kind", None)
+    entry.setdefault("saved_kind", None)
     return entry
 
 

@@ -5,8 +5,13 @@ import type { EngineInterface, Register, Timer } from 'claude-code'
 // message holds the handoff block, and that ContextRail lets end, means it saved
 // the handoff; it blocks again only to ask for a fix.
 const REQUEST = 'ContextRail: this session is at'
+// A request with these words (prompts.CHECKPOINT in ContextRail) asks for a checkpoint before the
+// hard point: work goes on in the session after it, so no new session is offered.
+const CHECKPOINT = 'This handoff is a checkpoint:'
 const OWN = 'ContextRail:'
 const BLOCK = /<contextrail-handoff>\s*([\s\S]*?)\s*<\/contextrail-handoff>/g
+// The same with each tag on a line of its own, so a tag quoted inside the handoff doesn't end it.
+const LINE_BLOCK = /^[ \t]*<contextrail-handoff>[ \t\r]*\n([\s\S]*?)\n[ \t]*<\/contextrail-handoff>[ \t\r]*$/gm
 const HEADING = /^##[ \t]+(.+?)[ \t#]*$/m
 const FALLBACK = 'Continue where the last session stopped. Start with the handoff\'s "Verify first" commands.'
 
@@ -29,6 +34,7 @@ const PALE = '#9ccfff'
 
 type State = {
   isRequested: boolean // ContextRail asked for a handoff and none was saved since
+  isCheckpoint: boolean // that request asked for a checkpoint
   held: string | undefined // a saved handoff's resume prompt, waiting for background work to finish
   resume: string | undefined // the resume prompt while the person is asked, or counted down to
   left: number | undefined // seconds left in a Lightning countdown
@@ -37,7 +43,8 @@ type State = {
 
 /** The last handoff block in a message, without its tags. */
 function handoffOf(text: string | undefined): string | undefined {
-  const blocks = [...(text ?? '').matchAll(BLOCK)]
+  const onLines = [...(text ?? '').matchAll(LINE_BLOCK)]
+  const blocks = onLines.length > 0 ? onLines : [...(text ?? '').matchAll(BLOCK)]
   return blocks.at(-1)?.[1]?.trim()
 }
 
@@ -223,7 +230,9 @@ async function keep($: EngineInterface, state: State, message = KEPT): Promise<v
 
 export const register: Register = (on, options) => {
   const afterManual = options['after_manual'] === true
-  const state: State = { isRequested: false, held: undefined, resume: undefined, left: undefined, offer: undefined }
+  const state: State = {
+    isRequested: false, isCheckpoint: false, held: undefined, resume: undefined, left: undefined, offer: undefined,
+  }
 
   // A prompt the person typed means they carry on here: nothing is offered for this handoff.
   on('prompt.submit', async ($, e, next) => {
@@ -319,14 +328,20 @@ export const register: Register = (on, options) => {
         // Claude Code labels every blocked stop "Stop hook error"; this one is a request.
         $.ui.toast('ContextRail: the "Stop hook error" above is ContextRail\'s request to the agent. Nothing failed.')
       }
-      state.isRequested ||= result.block.startsWith(REQUEST)
+      if (result.block.startsWith(REQUEST)) {
+        state.isRequested = true
+        state.isCheckpoint = result.block.includes(CHECKPOINT)
+      }
       return result
     }
     const body = handoffOf(e.last_assistant_message)
     const isSaved = body !== undefined && (state.isRequested || afterManual || state.held !== undefined)
     if (isSaved) {
+      const isOffered = !(state.isRequested && state.isCheckpoint)
       state.isRequested = false
-      state.held = resumePromptOf(body) ?? FALLBACK
+      if (isOffered) {
+        state.held = resumePromptOf(body) ?? FALLBACK
+      }
     }
     if (state.held === undefined) {
       return result
