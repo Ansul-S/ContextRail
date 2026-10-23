@@ -115,7 +115,7 @@ def _merge(cfg: Dict[str, Any], updates: Dict[str, Any]) -> None:
             continue
         try:
             cfg[key] = _coerce(key, value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue  # a bad value keeps the previous one
 
 
@@ -163,7 +163,7 @@ def _invalid(updates: Dict[str, Any], local: bool = False) -> List[Tuple[str, st
             continue
         try:
             coerced = _coerce(key, value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             found.append((key, f"has an invalid value, {json.dumps(value)}"))
             continue
         if key == "inject_on":

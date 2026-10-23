@@ -36,6 +36,12 @@ class ConfigTest(TempHome):
         self.assertEqual(cfg["inject_on"], ["startup", "clear", "compact"])
         self.assertNotIn("unknown", cfg)
 
+    def test_numbers_too_big_for_an_int_are_ignored(self):
+        self.home.mkdir(parents=True)
+        (self.home / "config.json").write_text('{"hard_tokens": 1e400}')
+        self.assertEqual(config.load()["hard_tokens"], 130_000)
+        self.assertEqual(config.problems(), [f"{self.home / 'config.json'}: 'hard_tokens' has an invalid value, Infinity"])
+
     def test_unreadable_config_falls_back(self):
         self.home.mkdir(parents=True)
         (self.home / "config.json").write_text("{not json")
