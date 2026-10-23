@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import __version__, config, facts, handoff, prompts, store
 from .config import tilde
-from .usage import Usage, last_assistant_text, last_usage, start_tokens
+from .usage import Usage, last_assistant_text, last_usage, session_start
 
 Payload = Dict[str, Any]
 Output = Optional[Dict[str, Any]]
@@ -113,10 +113,13 @@ def _open(payload: Payload) -> Tuple[Path, store.Project, Dict[str, Any]]:
 
 
 def _start(entry: Dict[str, Any], payload: Payload) -> int:
-    """The session's context at its start, kept in its state entry once known; 0 until then."""
-    if not isinstance(entry["start_tokens"], int):
-        entry["start_tokens"] = start_tokens(payload.get("transcript_path"))
-    return entry["start_tokens"] or 0
+    """The session's context at its start, kept in its state entry once final; 0 until known."""
+    if isinstance(entry["start_tokens"], int):
+        return entry["start_tokens"]
+    start, final = session_start(payload.get("transcript_path"))
+    if final:
+        entry["start_tokens"] = start
+    return start or 0
 
 
 def _record(payload: Payload, root: Path) -> Tuple[Optional[facts.GitState], facts.Activity]:
@@ -242,7 +245,9 @@ def _maybe_request(payload: Payload, cfg: Dict[str, Any], entry: Dict[str, Any])
     entry["retries"] = 0
     return {
         "decision": "block",
-        "reason": prompts.request(usage.describe(), cfg["max_chars"], refresh=saved is not None),
+        "reason": prompts.request(
+            usage.describe(), cfg["max_chars"], refresh=saved is not None, running=_labels(running)
+        ),
         "systemMessage": f"ContextRail: context is at {usage.tokens:,} tokens; asking for a handoff.",
     }
 
@@ -256,15 +261,20 @@ def _in_flight(tasks: Any) -> List[Dict[str, Any]]:
     ]
 
 
-def _waiting(running: List[Dict[str, Any]], hard: int) -> str:
+def _labels(running: List[Dict[str, Any]]) -> str:
+    """The first three tasks by their descriptions, and how many more; "" for none."""
     labels = []
     for task in running[:3]:
         text = " ".join(str(task.get("description") or task.get("type") or "task").split())
         labels.append(f"`{text if len(text) <= MAX_TASK_CHARS else text[: MAX_TASK_CHARS - 1] + '…'}`")
     more = f" and {len(running) - 3} more" if len(running) > 3 else ""
+    return f"{', '.join(labels)}{more}"
+
+
+def _waiting(running: List[Dict[str, Any]], hard: int) -> str:
     count = f"{len(running)} background task{'' if len(running) == 1 else 's'}"
     return (
-        f"ContextRail: waiting for {count} ({', '.join(labels)}{more}) to finish before asking for a "
+        f"ContextRail: waiting for {count} ({_labels(running)}) to finish before asking for a "
         f"handoff, at most until {hard:,} tokens. Run /contextrail:handoff to write one now."
     )
 

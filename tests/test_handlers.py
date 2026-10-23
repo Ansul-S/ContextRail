@@ -58,6 +58,22 @@ class StopTest(TempHome):
         self.at_tokens(151_000, model=large, start=START)
         self.assertEqual(self.stop(last_assistant_message="ok")["decision"], "block")
 
+    def test_keeps_the_start_only_once_it_is_final(self):
+        large = "claude-opus-5-5[1m]"
+        listing = {"type": "attachment", "isSidechain": False, "attachment": {"type": "skill_listing"}}
+        write_transcript(self.transcript, [user("start"), assistant(30_726, model=large)])
+        self.assertIsNone(self.stop(last_assistant_message="ok"))
+        self.assertIsNone(store.load_state(self.project())["sessions"]["session-1"]["start_tokens"])
+        # Claude Code sent its listings with the second request: the start is the second reply.
+        write_transcript(self.transcript, [
+            user("start"), assistant(30_726, model=large), listing, assistant(61_159, model=large),
+            assistant(160_000, model=large),
+        ])
+        self.assertIsNone(self.stop(last_assistant_message="ok"))
+        self.assertEqual(store.load_state(self.project())["sessions"]["session-1"]["start_tokens"], 61_159)
+        self.at_tokens(162_000, model=large, start=30_726)
+        self.assertEqual(self.stop(last_assistant_message="ok")["decision"], "block")
+
     def test_small_windows_keep_the_share_cap(self):
         self.at_tokens(101_000, start=50_522)
         self.assertEqual(self.stop(last_assistant_message="ok")["decision"], "block")
@@ -165,7 +181,15 @@ class StopTest(TempHome):
 
     def test_asks_anyway_at_the_hard_limit(self):
         self.at_tokens(131_000)
-        self.assertEqual(self.stop(last_assistant_message="ok", background_tasks=[TASK])["decision"], "block")
+        out = self.stop(last_assistant_message="ok", background_tasks=[TASK])
+        self.assertEqual(out["decision"], "block")
+        self.assertIn(
+            "Background tasks are still running (`pytest -q`): list them under In progress, "
+            "with how to check their results.",
+            out["reason"],
+        )
+        self.at_tokens(150_000)
+        self.assertNotIn("Background tasks", self.stop(last_assistant_message="ok")["reason"])
 
     def test_only_tasks_in_flight_hold_the_request(self):
         self.at_tokens(102_000)
@@ -222,7 +246,12 @@ class PostToolTest(TempHome):
         self.at_tokens(131_000)
         out = self.post()
         self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "PostToolUse")
-        self.assertIn("past the wrap-up point", out["hookSpecificOutput"]["additionalContext"])
+        context = out["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("past the wrap-up point", context)
+        # The step in hand runs to the end and the user sees its results; only new work waits.
+        self.assertIn("Finish the step you are on, and don't start another", context)
+        self.assertIn("let commands that are still running finish, and show the user their results", context)
+        self.assertNotIn("Don't start new work", context)
         self.at_tokens(150_000)
         self.assertIsNone(self.post())
         self.at_tokens(162_000)

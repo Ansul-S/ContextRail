@@ -93,6 +93,14 @@ COMPACT_BOUNDARY = {
 }
 
 
+def listing(kind="skill_listing"):
+    """A line where Claude Code 2.1.309 lists skills, agents, MCP instructions or deferred tools, trimmed."""
+    return {
+        "parentUuid": "d1db09c2", "isSidechain": False, "type": "attachment",
+        "attachment": {"type": kind, "content": "- gsd-help: Show available GSD commands", "isInitial": True},
+    }
+
+
 class StartTokensTest(LastUsageTest):
     def test_first_main_thread_reply(self):
         synthetic = assistant(0)
@@ -117,6 +125,36 @@ class StartTokensTest(LastUsageTest):
         self.assertIsNone(usage.start_tokens(None))
         write_transcript(self.path, [user()])
         self.assertIsNone(usage.start_tokens(str(self.path)))
+
+    def test_final_once_the_next_reply_exists(self):
+        # One reply is written as a line per content block, all with its message id.
+        write_transcript(self.path, [user(), listing(), assistant(51_438, message_id="m1"), assistant(51_438, message_id="m1")])
+        self.assertEqual(usage.session_start(str(self.path)), (51_438, False))
+        write_transcript(self.path, [
+            user(), listing(), assistant(51_438, message_id="m1"), tool_result("t1"), assistant(58_267), listing(),
+        ])
+        self.assertEqual(usage.session_start(str(self.path)), (51_438, True))
+
+    def test_listings_sent_after_the_first_reply(self):
+        # As in a session started by contextrail-continue's prompt on Claude Code 2.1.309.
+        entries = [user(), assistant(30_726, message_id="m1"), assistant(30_726, message_id="m1"), tool_result("t1")]
+        entries += [listing(kind) for kind in usage.LISTINGS] + [assistant(61_159), assistant(64_435)]
+        write_transcript(self.path, entries)
+        self.assertEqual(usage.session_start(str(self.path)), (61_159, True))
+        self.assertEqual(usage.start_tokens(str(self.path)), 61_159)
+        write_transcript(self.path, entries[:-2])
+        self.assertEqual(usage.session_start(str(self.path)), (30_726, False))
+
+    def test_only_listing_attachments_move_the_start(self):
+        sidechain = dict(listing(), isSidechain=True)
+        write_transcript(self.path, [
+            user(), assistant(30_726), tool_result("t1", text='{"type": "skill_listing"}'), sidechain, assistant(36_000),
+        ])
+        self.assertEqual(usage.session_start(str(self.path)), (30_726, True))
+        write_transcript(self.path, [
+            user(), assistant(50_000), COMPACT_BOUNDARY, user(), assistant(20_000), listing(), assistant(45_000),
+        ])
+        self.assertEqual(usage.session_start(str(self.path)), (45_000, True))
 
 
 class LastAssistantTextTest(unittest.TestCase):

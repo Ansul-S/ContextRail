@@ -25,6 +25,9 @@ CHUNK = 256 * 1024
 MAX_SCAN = 16 * 1024 * 1024
 REPORT_FRESH = 24 * 3600
 SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+# Transcript attachments in which Claude Code lists skills, agents, MCP instructions and deferred tools.
+LISTINGS = ("skill_listing", "agent_listing_delta", "mcp_instructions_delta", "deferred_tools_delta")
+_LISTING_BYTES = tuple(f'"{name}"'.encode() for name in LISTINGS)
 
 
 @dataclass(frozen=True)
@@ -149,29 +152,64 @@ def last_usage(transcript_path: Optional[str], configured_window: Optional[int] 
 
 
 def start_tokens(transcript_path: Optional[str]) -> Optional[int]:
-    """Context at the session's first main-thread reply, or at the first one after
-    the latest compaction: what the session holds before any work, mostly Claude
-    Code's own system prompt and tools. None until there is such a reply."""
-    if not transcript_path:
+    """What the session holds before any work, mostly Claude Code's own system prompt,
+    tools and listings. None until there is a reply to read it from."""
+    return session_start(transcript_path)[0]
+
+
+def _parse(raw: bytes) -> Any:
+    try:
+        return json.loads(raw)
+    except ValueError:
         return None
-    start = None
+
+
+def _reply_id(entry: Any) -> Any:
+    return (entry.get("message") or {}).get("id") if isinstance(entry, dict) else None
+
+
+def session_start(transcript_path: Optional[str]) -> Tuple[Optional[int], bool]:
+    """The context at the session's first main-thread reply, or at the first one after the
+    latest compaction, and whether that is final: it is once the next reply exists.
+
+    Claude Code usually sends its listings of skills, agents, MCP instructions and deferred
+    tools with the first request. In sessions started by a plugin's prompt it can send them
+    with the second (measured: about 30k tokens), so then the start is the second reply's
+    context, which also holds the first step's tool results."""
+    if not transcript_path:
+        return None, False
+    first = first_id = start = None
+    late = False
     try:
         with open(transcript_path, "rb") as f:
             for raw in f:
-                if b'"compact_boundary"' not in raw and (start is not None or b'"usage"' not in raw):
+                if b'"compact_boundary"' in raw and _is_boundary(_parse(raw)):
+                    first = first_id = start = None
+                    late = False
+                elif start is not None:
                     continue
-                try:
-                    entry = json.loads(raw)
-                except ValueError:
-                    continue
-                system = isinstance(entry, dict) and entry.get("type") == "system"
-                if system and entry.get("subtype") == "compact_boundary":
-                    start = None
-                elif start is None:
-                    start = _context_tokens(entry) or None
+                elif first is not None and any(name in raw for name in _LISTING_BYTES) and _is_listing(_parse(raw)):
+                    late = True
+                elif b'"usage"' in raw:
+                    entry = _parse(raw)
+                    tokens = _context_tokens(entry)
+                    if tokens and first is None:
+                        first, first_id = tokens, _reply_id(entry)
+                    elif tokens and (first_id is None or _reply_id(entry) != first_id):
+                        start = tokens if late else first
     except OSError:
-        return None
-    return start
+        return None, False
+    return (start, True) if start is not None else (first, False)
+
+
+def _is_boundary(entry: Any) -> bool:
+    return isinstance(entry, dict) and entry.get("type") == "system" and entry.get("subtype") == "compact_boundary"
+
+
+def _is_listing(entry: Any) -> bool:
+    if not isinstance(entry, dict) or entry.get("type") != "attachment" or entry.get("isSidechain"):
+        return False
+    return (entry.get("attachment") or {}).get("type") in LISTINGS
 
 
 def last_assistant_text(transcript_path: Optional[str]) -> str:

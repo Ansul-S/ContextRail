@@ -56,7 +56,8 @@ RULES = """- Be specific and brief: file paths, function names, commands, number
 - Stay under {max_chars:,} characters. Git state, edited files and test commands are recorded automatically, so don't repeat them."""
 
 
-def request(usage_line: str, max_chars: int, refresh: bool) -> str:
+def request(usage_line: str, max_chars: int, refresh: bool, running: str = "") -> str:
+    """running: the background tasks still in flight, as the user would recognise them."""
     # mods/contextrail-continue recognises the request by its first words; a test keeps them in step.
     opening = (
         f"ContextRail: this session is at {usage_line}. "
@@ -65,6 +66,11 @@ def request(usage_line: str, max_chars: int, refresh: bool) -> str:
     )
     if refresh:
         opening += " Context has grown a lot since the last handoff, so write a fresh one."
+    if running:
+        opening += (
+            f" Background tasks are still running ({running}): list them under In progress, "
+            "with how to check their results."
+        )
     return (
         f"{opening}\n\n"
         "Reply with the handoff block below, filled in. No tool calls are needed.\n"
@@ -84,10 +90,12 @@ def fix(issues: List[str]) -> str:
 
 
 def wrap_up(usage_line: str) -> str:
+    # "Don't start new work" alone made agents drop the commands of the step they were on.
     return (
         f"ContextRail: this session is at {usage_line}, past the wrap-up point. "
-        "Don't start new work. Bring the current step to a safe stopping point "
-        "(no half-applied edits), then end your turn. ContextRail will then ask for a handoff."
+        "Finish the step you are on, and don't start another: run the commands it still needs, "
+        "let commands that are still running finish, and show the user their results. "
+        "Don't leave an edit half-applied. Then end your turn; ContextRail will ask for a handoff."
     )
 
 
