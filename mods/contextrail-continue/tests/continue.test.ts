@@ -47,7 +47,15 @@ function engine(on: On) {
     stopAnswer: {} as { block?: string },
     isPlaced: true,
     answer: undefined as string | undefined, // undefined: the dialog is dismissed
+    config: undefined as string | undefined, // ~/.contextrail/config.json; undefined: there is none
   }
+  mock.env(on, { HOME: '/Users/test' })
+  on('fs.read', (_, e) => {
+    if (e.path !== '/Users/test/.contextrail/config.json' || world.config === undefined) {
+      return { deny: `ENOENT: no such file, open '${e.path}'` }
+    }
+    return { value: world.config }
+  })
   on('classic.Stop', () => world.stopAnswer)
   on('command.run', (_, e) => {
     seen.commands.push(e.command)
@@ -193,19 +201,52 @@ test('a new turn or a prompt from the person takes the question back', async ($,
   expect(seen.commands).toEqual([])
 })
 
-test('background tasks hold it', async ($, on) => {
+test('background work holds the offer until it finishes and its results are shown', async ($, on) => {
   const { clock, seen, world } = engine(on)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  const running = [{ id: 'b1', type: 'shell', status: 'running', description: 'npm test' }]
   world.stopAnswer = { block: REQUEST }
   await stop($, 'ok')
   world.stopAnswer = {}
-  await $.classic.Stop({
-    stop_hook_active: true,
-    last_assistant_message: HANDOFF,
-    background_tasks: [{ id: 'b1', type: 'shell', status: 'running', description: 'npm test' }],
-  })
+  await $.classic.Stop({ stop_hook_active: true, last_assistant_message: HANDOFF, background_tasks: running })
   await clock.advance(60_000)
   expect(seen.opened).toEqual([])
-  expect(seen.toasts.at(-1)).toContain('Not offering a new session while background or scheduled tasks are pending')
+  expect(seen.toasts.at(-1)).toContain('once they finish and their results are shown, ContextRail offers a new session')
+
+  // The task's notification starts a turn, in which the agent shows the results.
+  await $.turn.start({ text: '', turnId: 't2' })
+  await $.classic.Stop({ stop_hook_active: false, last_assistant_message: 'Still running.', background_tasks: running })
+  await clock.advance(60_000)
+  expect(seen.opened).toEqual([])
+  await $.turn.start({ text: '', turnId: 't3' })
+  await $.classic.Stop({ stop_hook_active: false, last_assistant_message: 'npm test passed: 214 tests.', background_tasks: [] })
+  await clock.advance(500)
+  expect(seen.opened).toEqual(['contextrail-continue'])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'yes' })
+  await clock.settle()
+  expect(seen.prompts).toEqual([RESUME])
+  await ui.unmount()
+})
+
+test('a prompt from the person, or the session ending, drops a held offer', async ($, on) => {
+  const { clock, seen, world } = engine(on)
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+  const crons = [{ id: 'c1', schedule: '*/5 * * * *', recurring: true, prompt: '/babysit-prs' }]
+  for (const carryOn of ['prompt', 'end'] as const) {
+    world.stopAnswer = { block: REQUEST }
+    await stop($, 'ok')
+    world.stopAnswer = {}
+    await $.classic.Stop({ stop_hook_active: true, last_assistant_message: HANDOFF, session_crons: crons })
+    if (carryOn === 'prompt') {
+      await $.prompt.submit({ text: 'how is it going?', origin: { kind: 'composer' }, wait: false })
+    } else {
+      await $.session.end({ reason: 'other', sessionId: 's1', resume: { id: 's1' } })
+    }
+    await stop($, 'All done.')
+    await clock.advance(60_000)
+    expect(seen.opened).toEqual([])
+  }
 })
 
 test('asks in a dialog where the pane cannot be shown', async ($, on) => {

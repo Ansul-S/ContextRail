@@ -15,12 +15,23 @@ const QUESTION = 'ContextRail saved the handoff. Start a new session from it?'
 const YES = 'Start a new session'
 const NO = 'Keep this session'
 const KEPT = 'ContextRail: kept this session. The handoff is saved; type /clear when you want to continue from it.'
+const TYPING = 'ContextRail: kept this session because you are typing. Type /clear when you want to continue from the handoff.'
+const HELD =
+  'ContextRail: handoff saved. Background or scheduled tasks are still running; once they finish and their results ' +
+  'are shown, ContextRail offers a new session. Type /clear to continue from the handoff sooner.'
 // The question waits for the turn to finish ending, so the pane can take the keys.
 const OFFER_DELAY_MS = 500
 
+// Lightning Mode (`/contextrail:lightning`): a new session starts on its own after a countdown.
+const LIGHTNING_SECONDS = 10
+const BLUE = '#3b9eff'
+const PALE = '#9ccfff'
+
 type State = {
   isRequested: boolean // ContextRail asked for a handoff and none was saved since
-  resume: string | undefined // the resume prompt while the person is asked
+  held: string | undefined // a saved handoff's resume prompt, waiting for background work to finish
+  resume: string | undefined // the resume prompt while the person is asked, or counted down to
+  left: number | undefined // seconds left in a Lightning countdown
   offer: Timer | undefined
 }
 
@@ -43,10 +54,31 @@ function resumePromptOf(body: string): string | undefined {
   return resume
 }
 
-/** Drops the question without an answer: the person carried on in this session. */
+/**
+ * Whether Lightning Mode is on: ContextRail's `lightning_tokens` from its
+ * environment variable, else from the global config.json, where
+ * `/contextrail:lightning` writes it. ContextRail reads it only there too.
+ */
+async function isLightning($: EngineInterface): Promise<boolean> {
+  let value: unknown = await $.env.get('CONTEXTRAIL_LIGHTNING_TOKENS')
+  if (value === undefined) {
+    const home = (await $.env.get('HOME')) ?? ''
+    const root = ((await $.env.get('CONTEXTRAIL_HOME')) ?? `${home}/.contextrail`).replace(/^~(?=\/|$)/, home)
+    try {
+      value = JSON.parse(await $.fs.read(`${root}/config.json`))?.lightning_tokens
+    } catch {
+      value = undefined // no config.json, or not JSON: ContextRail's defaults, Lightning off
+    }
+  }
+  const tokens = typeof value === 'boolean' ? 0 : Number(value)
+  return Number.isInteger(tokens) && tokens > 0
+}
+
+/** Drops the question or countdown without an answer: the person carried on in this session. */
 async function withdraw($: EngineInterface, state: State): Promise<void> {
   state.offer?.cancel()
   state.offer = undefined
+  state.left = undefined
   if (state.resume === undefined) {
     return
   }
@@ -90,13 +122,61 @@ async function ask($: EngineInterface, state: State): Promise<void> {
   }
 }
 
-/** y: clears the session and sends the resume prompt. */
+/** Lightning: counts down in a pane, or in a toast where no pane can be shown, then starts a new session. */
+async function countDown($: EngineInterface, state: State): Promise<void> {
+  state.offer = undefined
+  if (state.resume === undefined) {
+    return
+  }
+  state.left = LIGHTNING_SECONDS
+  const opened = await $.ui.open({
+    id: PANE,
+    title: '⚡ ContextRail',
+    focus: true,
+    closeOnEscape: true,
+    holdToasts: true,
+    rows: 3,
+  })
+  if (state.left === undefined) {
+    return // taken back while the pane opened
+  }
+  if (!opened.isPlaced) {
+    await $.ui.close({ id: PANE })
+    $.ui.toast(
+      `⚡ ContextRail Lightning Mode: handoff saved. Starting a new session in ${LIGHTNING_SECONDS} s; ` +
+        'start typing to stay in this session.',
+      { timeoutMs: LIGHTNING_SECONDS * 1000 },
+    )
+  }
+  state.offer = $.clock.every(1000, async () => {
+    if (state.left === undefined) {
+      return
+    }
+    state.left -= 1
+    if (state.left > 0) {
+      $.ui.invalidate('ui.render')
+      return
+    }
+    state.offer?.cancel()
+    state.offer = undefined
+    state.left = undefined
+    if ((await $.prompt.read()).text.trim() !== '') {
+      await keep($, state, TYPING)
+    } else {
+      startNew($, state)
+    }
+  })
+}
+
+/** y, or the end of a countdown: clears the session and sends the resume prompt. */
 function startNew($: EngineInterface, state: State): void {
   const resume = state.resume
   if (resume === undefined) {
     return
   }
+  state.offer?.cancel()
   state.resume = undefined
+  state.left = undefined
   // From a timer: `/clear` is refused inside a hook the turn waits on.
   state.offer = $.clock.after(0, async () => {
     state.offer = undefined
@@ -111,36 +191,43 @@ function startNew($: EngineInterface, state: State): void {
 }
 
 /** n: keeps the session; the saved handoff still loads after a later /clear. */
-async function keep($: EngineInterface, state: State): Promise<void> {
+async function keep($: EngineInterface, state: State, message = KEPT): Promise<void> {
   if (state.resume === undefined) {
     return
   }
+  state.offer?.cancel()
+  state.offer = undefined
   state.resume = undefined
+  state.left = undefined
   await $.ui.close({ id: PANE })
-  $.ui.toast(KEPT)
+  $.ui.toast(message)
 }
 
 export const register: Register = (on, options) => {
   const afterManual = options['after_manual'] === true
-  const state: State = { isRequested: false, resume: undefined, offer: undefined }
+  const state: State = { isRequested: false, held: undefined, resume: undefined, left: undefined, offer: undefined }
 
+  // A prompt the person typed means they carry on here: nothing is offered for this handoff.
   on('prompt.submit', async ($, e, next) => {
     if (e.origin.kind === 'composer') {
+      state.held = undefined
       await withdraw($, state)
     }
     return next(e)
   })
 
-  // New work on the main loop (a prompt, a background task's notification)
-  // means the handoff no longer describes where the session stops.
+  // Other new work on the main loop, such as a background task's notification, takes an open
+  // question back until the turn ends; the next stop with nothing pending offers it again.
   on('turn.start', async ($, e, next) => {
-    if (e.agentId === undefined) {
+    if (e.agentId === undefined && state.resume !== undefined) {
+      state.held = state.resume
       await withdraw($, state)
     }
     return next(e)
   })
 
   on('session.end', async ($, e, next) => {
+    state.held = undefined
     await withdraw($, state)
     state.isRequested = false
     return next(e)
@@ -150,7 +237,10 @@ export const register: Register = (on, options) => {
   on('ui.close', async ($, e, next) => {
     const result = await next(e)
     if (e.id === PANE && e.origin.kind === 'person' && state.resume !== undefined) {
+      state.offer?.cancel()
+      state.offer = undefined
       state.resume = undefined
+      state.left = undefined
       $.ui.toast(KEPT)
     }
     return result
@@ -160,6 +250,32 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     if (state.resume === undefined) {
       return <Text dimColor>No handoff is waiting. Press Esc to close.</Text>
+    }
+    const hint = !e.props.isFocused && <Text dimColor>Press ctrl+x tab to answer here.</Text>
+    if (state.left !== undefined) {
+      const done = LIGHTNING_SECONDS - state.left
+      return (
+        <Box flexDirection="column">
+          <Text color={BLUE} bold>
+            ⚡ Lightning Mode: starting a new session in {state.left} s
+          </Text>
+          <Text>
+            <Text color={BLUE}>{'━'.repeat(done * 2)}</Text>
+            <Text color={PALE}>●</Text>
+            <Text dimColor>{'┄'.repeat(state.left * 2)}</Text>
+            <Text color={BLUE}> ⚡</Text>
+          </Text>
+          <Box flexDirection="row" columnGap={3}>
+            <Button key="now" hotkey="y" plain onPress={() => startNew($, state)}>
+              Start now
+            </Button>
+            <Button key="stay" hotkey="n" plain onPress={() => keep($, state)}>
+              Stay in this session
+            </Button>
+          </Box>
+          {hint}
+        </Box>
+      )
     }
     return (
       <Box flexDirection="column">
@@ -173,7 +289,7 @@ export const register: Register = (on, options) => {
             {NO}
           </Button>
         </Box>
-        {!e.props.isFocused && <Text dimColor>Press ctrl+x tab to answer here.</Text>}
+        {hint}
       </Box>
     )
   })
@@ -189,21 +305,30 @@ export const register: Register = (on, options) => {
       return result
     }
     const body = handoffOf(e.last_assistant_message)
-    if (body === undefined || !(state.isRequested || afterManual)) {
+    const isSaved = body !== undefined && (state.isRequested || afterManual || state.held !== undefined)
+    if (isSaved) {
+      state.isRequested = false
+      state.held = resumePromptOf(body) ?? FALLBACK
+    }
+    if (state.held === undefined) {
       return result
     }
-    state.isRequested = false
+    // Background work still runs, and its results are still to come and be shown in this session.
     const pending = (e.background_tasks?.length ?? 0) + (e.session_crons?.length ?? 0)
     if (pending > 0) {
-      $.ui.toast(
-        'ContextRail: handoff saved. Not offering a new session while background or scheduled tasks are pending. ' +
-          'Type /clear when they are done.',
-      )
+      if (isSaved) {
+        $.ui.toast(HELD)
+      }
       return result
     }
     await withdraw($, state)
-    state.resume = resumePromptOf(body) ?? FALLBACK
-    state.offer = $.clock.after(OFFER_DELAY_MS, () => void ask($, state))
+    state.resume = state.held
+    state.held = undefined
+    if (await isLightning($)) {
+      state.offer = $.clock.after(OFFER_DELAY_MS, () => void countDown($, state))
+    } else {
+      state.offer = $.clock.after(OFFER_DELAY_MS, () => void ask($, state))
+    }
     return result
   })
 }
