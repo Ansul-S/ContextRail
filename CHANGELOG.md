@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 (2026-10-23)
 
-ContextRail stays out of Claude Code's way: handoffs load whole, scripted runs are left alone, and the companion plugin asks before it starts a new session. Lightning Mode, if you turn it on, starts one on its own at a context size you set.
+ContextRail stays out of Claude Code's way: handoffs load whole, scripted runs are left alone, handoffs before the wrap-up point are checkpoints you keep working through, and the companion plugin asks before it starts a new session. Your own trigger points are checked and explained. Lightning Mode, if you turn it on, starts a new session on its own at a context size you set.
 
 ### Upgrading
 
@@ -10,6 +10,8 @@ ContextRail stays out of Claude Code's way: handoffs load whole, scripted runs a
 - The default `max_chars` is now 8,000 instead of 12,000. If you set it higher in a `config.json`, a long handoff loads shortened.
 - ContextRail no longer runs in `claude -p` or the Agent SDK. To keep it running there, set `"unattended": true` or `CONTEXTRAIL_UNATTENDED=1`.
 - `contextrail-continue` no longer has the `delay_seconds` and `max_in_a_row` settings, because it now asks every time.
+- A new session is now offered at the wrap-up point (`hard_tokens`), not after the first handoff. Set `"new_session_at": "soft"` for the old behaviour.
+- `soft_tokens`, `hard_tokens`, `soft_pct` and `hard_pct` of 0 are now ignored as invalid, and a `hard_tokens` you set at or below `soft_tokens` is replaced by `soft_tokens` + 30,000. `/contextrail:doctor` lists both.
 
 ### Lightning Mode
 
@@ -19,6 +21,11 @@ ContextRail stays out of Claude Code's way: handoffs load whole, scripted runs a
 
 ### Triggers and settings
 
+- **Checkpoints, then the final handoff:** the handoff at the handoff point (`soft_tokens`) is now a checkpoint. It is saved, ContextRail says so, and work goes on in the same session, refreshed every `refresh_tokens`. At the wrap-up point (`hard_tokens`) ContextRail asks for the final handoff, and `contextrail-continue` offers a new session after it, still waiting while background tasks run. The new `new_session_at` setting (`"hard"`, or `"soft"` for every handoff) chooses where the offer comes. Lightning Mode always offers it at its own point.
+- **Your thresholds, explained:** each request comes with a note on the handoff and wrap-up points and what set each one (your token settings or a window share), the window size and where it came from, the last saved handoff, and any tasks still running, with the reminder that nothing is stopped. `/contextrail:status` shows the same.
+- **An assumed window says so:** when ContextRail can't detect the window size it assumes 200k. The request note, `/contextrail:status` and `/contextrail:doctor` (now a warning) say how far the 50% share moved the handoff, for example from 450,000 to 100,000, and how to fix it.
+- **Settings are checked:** the token settings and shares must be above 0, `new_session_at` must be `"hard"` or `"soft"`, and a `hard_tokens` you set must be above `soft_tokens`. Raising only `soft_tokens` moves an unset `hard_tokens` along with it, 30,000 later.
+- **Documented examples** for 200k and 1M windows and different ways of working, without claiming any number keeps a model reliable.
 - **The start includes late listings:** Claude Code sometimes attaches its skill, agent and MCP listings after the first reply, about 30k tokens. The start was measured before them, so the handoff came about 30k early. When listings arrive between the first and second reply, the start is now the context at the second reply.
 - **The wrap-up lets the step finish:** the wrap-up warning said "Don't start new work", and agents dropped the commands of the step they were on. It now asks them to finish that step, let running commands finish and show their results, and then stop.
 - **Running tasks go into the handoff:** when ContextRail stops waiting for background tasks at the wrap-up point, the request names the tasks still running and asks for them under In progress, with how to check their results.
@@ -26,7 +33,12 @@ ContextRail stays out of Claude Code's way: handoffs load whole, scripted runs a
 
 ### Loading
 
+- **A quoted tag no longer cuts a handoff short:** a handoff that mentioned `</contextrail-handoff>` in its own text, as in sessions about ContextRail, ended there, losing the sections after it. The block is now taken from tags that stand on lines of their own, with the old reading as a fallback. `contextrail-continue` reads the resume prompt the same way.
 - **Handoffs load whole:** Claude Code puts at most 10,000 characters of a hook's context into the session. Past that, the agent got only a file path and a 2 KB preview, which left out most of the handoff. ContextRail now keeps what it loads under that limit. The new `max_chars` default leaves room for the facts it adds. A longer handoff is shortened in a fixed order: known facts, dead ends, decisions, how to run, done, open questions. Items go from the end of each section, each section keeps its first item as long as it can, and a note says how many were left out and where the full handoff is. `/contextrail:doctor` says when the saved handoff would load shortened.
+
+### Measured
+
+- **A handoff evaluation:** `python3 -m tools.eval` regenerates real handoffs at different caps, lists what the next session needed, and has a model judge which handoff covers it. [docs/eval.md](docs/eval.md) describes the method and its limits and has the numbers: on 4 cases, a 6,000-character cap covered 54% of the needs against 61% at 8,000, so `max_chars` stays at 8,000. It is a development tool and never runs inside the plugin.
 
 ### Scripted runs
 
