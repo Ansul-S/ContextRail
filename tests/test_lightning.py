@@ -16,11 +16,11 @@ class LightningTest(TempHome):
         return code, out.getvalue()
 
     def config_file(self):
-        return json.loads((self.home / "config.json").read_text())
+        return json.loads((self.home / "config.json").read_text(encoding="utf-8"))
 
     def enable_continue(self, on=True):
         self.claude.mkdir(parents=True, exist_ok=True)
-        (self.claude / "settings.json").write_text(json.dumps({"enabledPlugins": {"contextrail-continue@contextrail": on}}))
+        (self.claude / "settings.json").write_text(json.dumps({"enabledPlugins": {"contextrail-continue@contextrail": on}}), encoding="utf-8")
 
     def test_parse(self):
         for text, tokens in (("200k", 200_000), ("0.2M", 200_000), ("200000", 200_000), ("200,000", 200_000),
@@ -31,7 +31,7 @@ class LightningTest(TempHome):
 
     def test_sets_and_turns_off_keeping_other_settings(self):
         self.home.mkdir(parents=True)
-        (self.home / "config.json").write_text(json.dumps({"refresh_tokens": 30_000}))
+        (self.home / "config.json").write_text(json.dumps({"refresh_tokens": 30_000}), encoding="utf-8")
         self.enable_continue()
         code, out = self.run_main("200k")
         self.assertEqual(code, 0)
@@ -52,11 +52,11 @@ class LightningTest(TempHome):
         self.assertIn("too small", out)
         self.assertFalse((self.home / "config.json").exists())
         self.home.mkdir(parents=True)
-        (self.home / "config.json").write_text("{broken")
+        (self.home / "config.json").write_text("{broken", encoding="utf-8")
         code, out = self.run_main("200k")
         self.assertEqual(code, 1)
         self.assertIn("left as it is", out)
-        self.assertEqual((self.home / "config.json").read_text(), "{broken")
+        self.assertEqual((self.home / "config.json").read_text(encoding="utf-8"), "{broken")
 
     def test_notes_what_it_needs_and_what_overrides_it(self):
         self.enable_continue(False)

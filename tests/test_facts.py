@@ -11,8 +11,8 @@ class GitStateTest(TempHome):
         self.assertEqual(state.branch, "main")
         self.assertEqual(state.subject, "initial commit")
         self.assertEqual(state.dirty, [])
-        (self.repo / "app.py").write_text("print('changed')\n")
-        (self.repo / "new.txt").write_text("n\n")
+        (self.repo / "app.py").write_text("print('changed')\n", encoding="utf-8")
+        (self.repo / "new.txt").write_text("n\n", encoding="utf-8")
         self.assertEqual(sorted(facts.git_state(self.repo).dirty), ["app.py", "new.txt"])
 
     def test_not_a_repo(self):
@@ -269,7 +269,7 @@ class DriftTest(TempHome):
         self.assertIn("app.py", found.changed)
 
     def test_a_plain_move_is_found_by_content(self):
-        (self.repo / "notes.txt").write_text("draft\n")
+        (self.repo / "notes.txt").write_text("draft\n", encoding="utf-8")
         meta = self.meta(hashes=True)
         (self.repo / "app.py").rename(self.repo / "server.py")
         (self.repo / "notes.txt").rename(self.repo / "NOTES.md")
@@ -279,7 +279,7 @@ class DriftTest(TempHome):
 
     def test_a_change_by_someone_else_between_sessions_is_found(self):
         meta = self.meta(hashes=True)
-        (self.repo / "app.py").write_text("print('edited in another editor')\n")
+        (self.repo / "app.py").write_text("print('edited in another editor')\n", encoding="utf-8")
         found = facts.drift(meta, self.repo)
         self.assertEqual(found.changed, ["app.py"])
 
@@ -290,12 +290,12 @@ class DriftTest(TempHome):
         self.assertEqual((state.branch, state.worktree_of), ("feature", str(self.repo)))
         self.assertEqual(facts.git_state(self.repo).worktree_of, "")
         meta = {"branch": state.branch, "head": state.head, "dirty": [], "diff_hash": state.diff_hash, "file_hashes": {}}
-        (tree / "app.py").write_text("print('in the worktree')\n")
+        (tree / "app.py").write_text("print('in the worktree')\n", encoding="utf-8")
         self.assertEqual(facts.drift(meta, tree).changed, ["app.py"])
         self.assertEqual(facts.drift(self.meta(hashes=True), self.repo).changed, [])
 
     def test_rewritten_history_is_unverified(self):
-        (self.repo / "app.py").write_text("print('v2')\n")
+        (self.repo / "app.py").write_text("print('v2')\n", encoding="utf-8")
         git(self.repo, "commit", "-qam", "second")
         meta = self.meta(hashes=True)
         git(self.repo, "reset", "-q", "--hard", "HEAD~1")
@@ -318,11 +318,11 @@ class DriftTest(TempHome):
     def test_outside_git_the_files_the_session_edited_are_checked(self):
         plain = self.tmp / "plain"
         plain.mkdir()
-        (plain / "a.py").write_text("a\n")
-        (plain / "b.py").write_text("b\n")
+        (plain / "a.py").write_text("a\n", encoding="utf-8")
+        (plain / "b.py").write_text("b\n", encoding="utf-8")
         meta = {"saved_at": "x", "head": None, "edited_hashes": facts.edited_hashes(plain, ["a.py", "b.py"])}
         self.assertEqual(facts.drift(meta, plain).changed, [])
-        (plain / "a.py").write_text("changed\n")
+        (plain / "a.py").write_text("changed\n", encoding="utf-8")
         (plain / "b.py").unlink()
         found = facts.drift(meta, plain)
         self.assertEqual((found.changed, found.verified), (["a.py", "b.py"], True))
@@ -333,9 +333,9 @@ class DriftTest(TempHome):
 
     def test_new_commits_and_dirty_files(self):
         meta = self.meta()
-        (self.repo / "app.py").write_text("print('v2')\n")
+        (self.repo / "app.py").write_text("print('v2')\n", encoding="utf-8")
         git(self.repo, "commit", "-qam", "second change")
-        (self.repo / "todo.txt").write_text("x\n")
+        (self.repo / "todo.txt").write_text("x\n", encoding="utf-8")
         notes = facts.drift(meta, self.repo).notes
         self.assertEqual(len(notes), 2)
         self.assertIn("1 new commit(s) since the handoff", notes[0])
@@ -343,9 +343,9 @@ class DriftTest(TempHome):
         self.assertEqual(notes[1], "Newly uncommitted: todo.txt.")
 
     def test_uncommitted_edits_changed(self):
-        (self.repo / "app.py").write_text("print('wip')\n")
+        (self.repo / "app.py").write_text("print('wip')\n", encoding="utf-8")
         meta = self.meta()
-        (self.repo / "app.py").write_text("print('more wip')\n")
+        (self.repo / "app.py").write_text("print('more wip')\n", encoding="utf-8")
         self.assertEqual(facts.drift(meta, self.repo).notes, ["The uncommitted changes were edited after the handoff was saved."])
 
     def hashed_meta(self):
@@ -354,29 +354,29 @@ class DriftTest(TempHome):
         return meta
 
     def test_reload_right_after_a_handoff_with_uncommitted_work_is_quiet(self):
-        (self.repo / "app.py").write_text("print('wip')\n")
-        (self.repo / "notes.txt").write_text("todo\n")
+        (self.repo / "app.py").write_text("print('wip')\n", encoding="utf-8")
+        (self.repo / "notes.txt").write_text("todo\n", encoding="utf-8")
         found = facts.drift(self.hashed_meta(), self.repo)
         self.assertEqual(found, facts.Drift([], []))
 
     def test_changed_files_by_content(self):
         for name in ("edited.py", "reverted.py", "committed.py", "clean.py"):
-            (self.repo / name).write_text(f"# {name}\n")
-        (self.repo / ".gitignore").write_text("*.log\n")
+            (self.repo / name).write_text(f"# {name}\n", encoding="utf-8")
+        (self.repo / ".gitignore").write_text("*.log\n", encoding="utf-8")
         git(self.repo, "add", ".")
         git(self.repo, "commit", "-qm", "files")
         for name in ("edited.py", "reverted.py", "committed.py"):
-            (self.repo / name).write_text(f"# {name}, uncommitted at the handoff\n")
+            (self.repo / name).write_text(f"# {name}, uncommitted at the handoff\n", encoding="utf-8")
         for name in ("deleted.txt", "kept.txt"):
-            (self.repo / name).write_text("untracked\n")
+            (self.repo / name).write_text("untracked\n", encoding="utf-8")
         meta = self.hashed_meta()
-        (self.repo / "edited.py").write_text("# edited again\n")
+        (self.repo / "edited.py").write_text("# edited again\n", encoding="utf-8")
         git(self.repo, "checkout", "--", "reverted.py")
         git(self.repo, "commit", "-qm", "commit as it was", "committed.py")
         (self.repo / "deleted.txt").unlink()
-        (self.repo / "clean.py").write_text("# changed after the handoff\n")
-        (self.repo / "new.txt").write_text("new\n")
-        (self.repo / "build.log").write_text("ignored\n")
+        (self.repo / "clean.py").write_text("# changed after the handoff\n", encoding="utf-8")
+        (self.repo / "new.txt").write_text("new\n", encoding="utf-8")
+        (self.repo / "build.log").write_text("ignored\n", encoding="utf-8")
         found = facts.drift(meta, self.repo)
         self.assertEqual(found.changed, ["clean.py", "deleted.txt", "edited.py", "new.txt", "reverted.py"])
         self.assertIn("No longer uncommitted (committed or reverted): committed.py, deleted.txt, reverted.py.", found.notes)
@@ -386,12 +386,12 @@ class DriftTest(TempHome):
         self.assertFalse(any(note.startswith("Newly uncommitted") for note in found.notes))
 
     def test_falls_back_to_git_state_without_file_hashes(self):
-        (self.repo / "a.txt").write_text("a\n")
-        (self.repo / "b.txt").write_text("b\n")
+        (self.repo / "a.txt").write_text("a\n", encoding="utf-8")
+        (self.repo / "b.txt").write_text("b\n", encoding="utf-8")
         with mock.patch.object(facts, "MAX_HASHED", 1):
             meta = self.hashed_meta()
         self.assertIsNone(meta["file_hashes"])
-        (self.repo / "c.txt").write_text("c\n")
+        (self.repo / "c.txt").write_text("c\n", encoding="utf-8")
         self.assertEqual(facts.drift(meta, self.repo), facts.Drift(["Newly uncommitted: c.txt."], []))
 
     def test_branch_switch_and_rewritten_history(self):

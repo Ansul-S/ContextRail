@@ -7,7 +7,7 @@ import time
 import unittest
 from unittest import mock
 
-from contextrail import doctor, handlers, store
+from contextrail import config, doctor, handlers, store
 from tests.helpers import CR, VALID_BODY, TempHome, assistant, user, write_transcript
 
 REAL_CHECK_PYTHON = doctor.check_python
@@ -40,7 +40,7 @@ class DoctorTest(TempHome):
         handlers.heartbeat("Stop")
         result = subprocess.run(
             [sys.executable, str(CR), "doctor", str(self.repo)],
-            capture_output=True, text=True, env=dict(os.environ), timeout=60,
+            capture_output=True, text=True, env=dict(os.environ), timeout=60, encoding="utf-8",
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(f"doctor, for {self.repo}", result.stdout)
@@ -49,10 +49,10 @@ class DoctorTest(TempHome):
 
     def test_broken_config_fails_with_a_clear_message(self):
         self.home.mkdir(parents=True)
-        (self.home / "config.json").write_text('{"soft_tokens": 90000,}')
+        (self.home / "config.json").write_text('{"soft_tokens": 90000,}', encoding="utf-8")
         settings = self.results()["Settings"]
         self.assertEqual(settings.status, "fail")
-        self.assertIn(f"{self.home / 'config.json'} is not valid JSON", settings.detail)
+        self.assertIn(f"{config.tilde(self.home / 'config.json')} is not valid JSON", settings.detail)
         with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
             self.assertEqual(doctor.main([str(self.repo)]), 1)
         self.assertIn("  FAIL  Settings:", out.getvalue())
@@ -73,12 +73,12 @@ class DoctorTest(TempHome):
     def test_errors_are_reported(self):
         self.home.mkdir(parents=True)
         log = self.home / "error.log"
-        log.write_text(log_entry(3 * 86_400, "stop", "KeyError: 'a'"))
+        log.write_text(log_entry(3 * 86_400, "stop", "KeyError: 'a'"), encoding="utf-8")
         errors = self.results()["Errors"]
         self.assertEqual(errors.status, "warn")
         self.assertIn("1 in the last 7 days, 0 in the last 24 h", errors.detail)
 
-        log.write_text(log_entry(30 * 86_400, "stop", "OldError") + log.read_text() + log_entry(60, "post-tool", "ValueError: bad"))
+        log.write_text(log_entry(30 * 86_400, "stop", "OldError") + log.read_text(encoding="utf-8") + log_entry(60, "post-tool", "ValueError: bad"), encoding="utf-8")
         errors = self.results()["Errors"]
         self.assertEqual(errors.status, "fail")
         self.assertIn("2 in the last 7 days, 1 in the last 24 h", errors.detail)
@@ -96,7 +96,7 @@ class DoctorTest(TempHome):
         handlers.heartbeat("SessionStart")
         self.assertEqual(self.results()["Hooks"].status, "ok")  # Stop only runs after the first reply
 
-        (self.home / handlers.HEARTBEAT).write_text(json.dumps({"SessionStart": time.time() - 3_600}))
+        (self.home / handlers.HEARTBEAT).write_text(json.dumps({"SessionStart": time.time() - 3_600}), encoding="utf-8")
         hooks = self.results()["Hooks"]
         self.assertEqual(hooks.status, "warn")
         self.assertIn("SessionStart 1 hour ago, Stop never", hooks.detail)
@@ -186,7 +186,7 @@ class DoctorTest(TempHome):
         self.assertIn("the check itself failed: RuntimeError('boom')", storage.detail)
 
     def test_unwritable_storage(self):
-        self.home.write_text("a file, not a folder")
+        self.home.write_text("a file, not a folder", encoding="utf-8")
         self.assertEqual(self.results()["Storage"].status, "fail")
 
     def test_project_folder(self):
@@ -194,13 +194,13 @@ class DoctorTest(TempHome):
         self.at_tokens(10_000)
         handlers.on_stop(self.payload("Stop", last_assistant_message=f"<contextrail-handoff>\n{VALID_BODY}\n</contextrail-handoff>"))
         self.assertEqual(self.results()["Project"].status, "ok")
-        project.state.write_text("{broken")
+        project.state.write_text("{broken", encoding="utf-8")
         result = self.results()["Project"]
         self.assertEqual(result.status, "fail")
         self.assertIn("state.json", result.detail)
         project.state.unlink()
         identity = store.read_json(project.identity)
-        project.identity.write_text(json.dumps(dict(identity, canonical="/somewhere/else")))
+        project.identity.write_text(json.dumps(dict(identity, canonical="/somewhere/else")), encoding="utf-8")
         results = self.results()
         self.assertEqual(results["Project"].status, "fail")
         self.assertIn("belongs to /somewhere/else", results["Project"].detail)
@@ -209,7 +209,7 @@ class DoctorTest(TempHome):
     def test_a_legacy_folder_left_in_place_warns(self):
         legacy = self.home / "projects" / store.claude_slug(self.repo)
         legacy.mkdir(parents=True)
-        (legacy / "meta.json").write_text(json.dumps({"head": "deadbeef" * 5}))
+        (legacy / "meta.json").write_text(json.dumps({"head": "deadbeef" * 5}), encoding="utf-8")
         result = self.results()["Project"]
         self.assertEqual(result.status, "warn")
         self.assertIn("its commit deadbeefd is not in this repository", result.detail)
@@ -219,7 +219,7 @@ class DoctorTest(TempHome):
     def test_privacy(self):
         store.make_dir(self.home)
         self.assertEqual(self.results()["Privacy"].status, "ok")
-        (self.home / "HANDOFF.md").write_text("x")
+        (self.home / "HANDOFF.md").write_text("x", encoding="utf-8")
         (self.home / "HANDOFF.md").chmod(0o644)
         result = self.results()["Privacy"]
         self.assertEqual(result.status, "warn")
@@ -238,10 +238,13 @@ class DoctorTest(TempHome):
         self.assertIn("older than 2.1.163", result.detail)
 
     def test_a_relative_home_warns(self):
-        self.addCleanup(os.chdir, os.getcwd())
+        cwd = os.getcwd()
         os.chdir(self.tmp)
-        with mock.patch.dict(os.environ, {"CONTEXTRAIL_HOME": "relative-home"}):
-            storage = doctor.check_storage()
+        try:
+            with mock.patch.dict(os.environ, {"CONTEXTRAIL_HOME": "relative-home"}):
+                storage = doctor.check_storage()
+        finally:
+            os.chdir(cwd)  # before tearDown removes the folder: Windows can't remove the working directory
         self.assertEqual(storage.status, "warn")
         self.assertIn("CONTEXTRAIL_HOME is a relative path (relative-home)", storage.detail)
 
@@ -262,18 +265,21 @@ class PythonCheckTest(TempHome):
         self.assertEqual(result, doctor.Result("fail", "Python", "python3 is not on PATH, so the hooks can't start"))
 
     def test_hook_environment_undoes_pyenv_exec(self):
+        def paths(*entries):
+            return os.pathsep.join(entry.replace("/", os.sep) for entry in entries)
+
         inside = {
-            "PATH": os.pathsep.join(["/p/versions/3.11.9/bin", "/brew/pyenv/2.6/libexec", "/p/shims", "/usr/bin"]),
-            "PYENV_ROOT": "/p",
+            "PATH": paths("/p/versions/3.11.9/bin", "/brew/pyenv/2.6/libexec", "/p/shims", "/usr/bin"),
+            "PYENV_ROOT": paths("/p"),
             "PYENV_VERSION": "3.11.9",
-            "PYENV_DIR": "/work",
-            "PYENV_HOOK_PATH": "/p/pyenv.d",
-            "_PYENV_INSTALL_PREFIX": "/brew/pyenv/2.6",
+            "PYENV_DIR": paths("/work"),
+            "PYENV_HOOK_PATH": paths("/p/pyenv.d"),
+            "_PYENV_INSTALL_PREFIX": paths("/brew/pyenv/2.6"),
         }
         with mock.patch.dict(os.environ, inside, clear=True):
             env = doctor.hook_environment()
-        self.assertEqual(env, {"PATH": os.pathsep.join(["/p/shims", "/usr/bin"]), "PYENV_ROOT": "/p"})
+        self.assertEqual(env, {"PATH": paths("/p/shims", "/usr/bin"), "PYENV_ROOT": paths("/p")})
 
-        outside = {"PATH": os.pathsep.join(["/p/shims", "/usr/bin"]), "PYENV_ROOT": "/p"}
+        outside = {"PATH": paths("/p/shims", "/usr/bin"), "PYENV_ROOT": paths("/p")}
         with mock.patch.dict(os.environ, outside, clear=True):
             self.assertEqual(doctor.hook_environment(), outside)

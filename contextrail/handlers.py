@@ -128,10 +128,12 @@ def describe_age(seconds: Optional[float]) -> str:
 
 
 def copy_to_clipboard(text: str) -> bool:
+    data = text.encode("utf-8", "replace")
     if sys.platform == "darwin":
         candidates = [["pbcopy"]]
     elif sys.platform.startswith("win"):
         candidates = [["clip"]]
+        data = text.encode("utf-16", "replace")  # clip reads the code page unless the text starts with a UTF-16 BOM
     else:
         candidates = [["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]
     for command in candidates:
@@ -140,7 +142,7 @@ def copy_to_clipboard(text: str) -> bool:
         try:
             # No pipes on stdout/stderr: xclip keeps them open after it forks.
             subprocess.run(
-                command, input=text, text=True, timeout=3, check=True,
+                command, input=data, timeout=3, check=True,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             return True

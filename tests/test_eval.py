@@ -116,7 +116,7 @@ class EvalTest(TempHome):
         self.fake = FakeClaude()
         self.harness = Harness(config.home() / "eval", runner=self.fake)
         self.doc = self.tmp / "eval.md"
-        self.doc.write_text(f"# Evaluation\n\nBefore.\n\n{report.START}\nold numbers\n{report.END}\n\nAfter.\n")
+        self.doc.write_text(f"# Evaluation\n\nBefore.\n\n{report.START}\nold numbers\n{report.END}\n\nAfter.\n", encoding="utf-8")
 
     def main(self, *args):
         out = io.StringIO()
@@ -140,7 +140,7 @@ class EvalTest(TempHome):
         self.assertTrue(cases.facts_part(case.loaded).startswith("# Handoff: repo"))
 
     def test_finds_a_request_sent_as_stop_feedback(self):
-        entries = [json.loads(raw) for raw in self.a_path.read_text().splitlines()]
+        entries = [json.loads(raw) for raw in self.a_path.read_text(encoding="utf-8").splitlines()]
         request = prompts.request(USAGE_LINE, 12_000, refresh=False)
         entries[2] = {"type": "attachment", "uuid": "r-1", "timestamp": "2026-10-20T09:55:01.000Z", "attachment": {
             "type": "hook_additional_context", "hookEvent": "Stop", "hookName": "Stop", "content": [request]}}
@@ -182,13 +182,13 @@ class EvalTest(TempHome):
         self.assertIn("<loaded-handoff>", calls[2][1])
         self.assertNotIn("used", calls[3][1].split("<needs>")[1])  # the judge doesn't see the kinds
 
-        needs = json.loads((folder / "needs.json").read_text())["needs"]
+        needs = json.loads((folder / "needs.json").read_text(encoding="utf-8"))["needs"]
         self.assertEqual([(item["id"], item["kind"]) for item in needs], [(1, "used"), (2, "rechecked")])
-        self.assertTrue(json.loads((folder / "gen-6000.json").read_text())["reply"].startswith("<contextrail-handoff>"))
-        judgment = json.loads((folder / "judge-saved-6000.json").read_text())
+        self.assertTrue(json.loads((folder / "gen-6000.json").read_text(encoding="utf-8"))["reply"].startswith("<contextrail-handoff>"))
+        judgment = json.loads((folder / "judge-saved-6000.json").read_text(encoding="utf-8"))
         self.assertEqual(judgment["verdicts"][1], {"id": 2, "saved": "covered", "6000": "missing"})
         self.assertEqual(judgment["better"], "saved")
-        run = json.loads((self.harness.root / "run.json").read_text())
+        run = json.loads((self.harness.root / "run.json").read_text(encoding="utf-8"))
         self.assertEqual((run["calls"], run["error"], run["claude"], run["cases"]), (9, None, "9.9.9 (Claude Code)", [KEY]))
 
         # A second run finds everything done.
@@ -228,8 +228,8 @@ class EvalTest(TempHome):
             self.assertIn("everything the next session would get", stdin)
         saved_side = next(stdin for stdin in with_baseline if "plain notes" in stdin)
         self.assertIn("# Handoff: repo", saved_side)  # the saved handoff comes with its recorded facts
-        self.assertEqual(json.loads((folder / "judge-saved-notes.json").read_text())["facts"], "with each")
-        self.assertEqual(json.loads((folder / "judge-saved-6000.json").read_text())["facts"], "shared")
+        self.assertEqual(json.loads((folder / "judge-saved-notes.json").read_text(encoding="utf-8"))["facts"], "with each")
+        self.assertEqual(json.loads((folder / "judge-saved-6000.json").read_text(encoding="utf-8"))["facts"], "shared")
 
         code, out = self.main("report")
         self.assertEqual(code, 0, out)
@@ -255,13 +255,13 @@ class EvalTest(TempHome):
         code, printed = self.main("export", "--out", str(out), "--seed", "7")
         self.assertEqual(code, 0, printed)
         self.assertEqual(sorted(path.name for path in out.iterdir()), ["README.txt", "case-01.md", "sheet.csv"])
-        key = json.loads((self.tmp / "review.key.json").read_text())
+        key = json.loads((self.tmp / "review.key.json").read_text(encoding="utf-8"))
         labels = key["cases"]["01"]["labels"]
         self.assertEqual(sorted(labels.values()), ["6000", "notes", "saved"])
-        packet = (out / "case-01.md").read_text()
+        packet = (out / "case-01.md").read_text(encoding="utf-8")
         for variant in ("saved", "6000", "notes"):
             self.assertNotIn(f"Document {variant}", packet)
-        self.assertNotIn(KEY, packet + (out / "sheet.csv").read_text())
+        self.assertNotIn(KEY, packet + (out / "sheet.csv").read_text(encoding="utf-8"))
 
         with open(out / "sheet.csv", newline="", encoding="utf-8") as f:
             rows = list(csv.reader(f))
@@ -274,7 +274,7 @@ class EvalTest(TempHome):
                 row[3 + "ABC".index(letter["6000"])] = "missing"
             filled.append(row)
         for name in ("ana", "ben"):
-            with open(self.tmp / f"{name}.csv", "w", newline="") as f:
+            with open(self.tmp / f"{name}.csv", "w", newline="", encoding="utf-8") as f:
                 csv.writer(f).writerows(filled)
         code, printed = self.main("agreement", str(self.tmp / "ana.csv"), str(self.tmp / "ben.csv"), "--key", str(self.tmp / "review.key.json"))
         self.assertEqual(code, 0, printed)
@@ -284,7 +284,7 @@ class EvalTest(TempHome):
 
         bad = [row[:] for row in filled]
         bad[1][3] = "great"
-        with open(self.tmp / "bad.csv", "w", newline="") as f:
+        with open(self.tmp / "bad.csv", "w", newline="", encoding="utf-8") as f:
             csv.writer(f).writerows(bad)
         code, printed = self.main("agreement", str(self.tmp / "bad.csv"), "--key", str(self.tmp / "review.key.json"))
         self.assertEqual(code, 1)
@@ -298,14 +298,14 @@ class EvalTest(TempHome):
 
     def test_report_writes_only_between_the_markers(self):
         self.main("run")
-        run = json.loads((self.harness.root / "run.json").read_text())
+        run = json.loads((self.harness.root / "run.json").read_text(encoding="utf-8"))
         text = report.render(report.load(self.harness, run), run)
         report.write(self.doc, text)
-        written = self.doc.read_text()
+        written = self.doc.read_text(encoding="utf-8")
         self.assertTrue(written.startswith("# Evaluation\n\nBefore.\n\n<!-- eval:results -->\nRun of "))
         self.assertTrue(written.endswith("|\n<!-- /eval:results -->\n\nAfter.\n"))
         self.assertNotIn("old numbers", written)
-        self.doc.write_text("no markers here")
+        self.doc.write_text("no markers here", encoding="utf-8")
         with self.assertRaises(EvalError):
             report.write(self.doc, text)
 
@@ -316,7 +316,7 @@ class EvalTest(TempHome):
         self.assertIn("Stopped: claude failed: API Error: overloaded", out)
         self.assertEqual(len(self.fake.model_calls()), 1)
         self.assertFalse((self.harness.root / "cases" / KEY / "gen-6000.json").exists())
-        run = json.loads((self.harness.root / "run.json").read_text())
+        run = json.loads((self.harness.root / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(run["calls"], 0)
         self.assertIn("overloaded", run["error"])
 
@@ -326,7 +326,7 @@ class EvalTest(TempHome):
             steps.generate(self.harness, self.case(), 6_000)
         self.assertIn("no handoff block in the reply at cap 6000", str(caught.exception))
         raw = self.harness.root / "cases" / KEY / "gen-6000.raw.txt"
-        self.assertEqual(raw.read_text(), "Sorry, I can't write that.")
+        self.assertEqual(raw.read_text(encoding="utf-8"), "Sorry, I can't write that.")
 
     def test_missing_verdicts_stop_the_judging(self):
         case = self.case()

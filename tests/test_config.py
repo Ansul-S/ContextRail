@@ -15,10 +15,10 @@ class ConfigTest(TempHome):
 
     def test_layers_global_project_env(self):
         self.home.mkdir(parents=True)
-        (self.home / "config.json").write_text(json.dumps({"soft_tokens": 90_000, "hard_tokens": 120_000}))
+        (self.home / "config.json").write_text(json.dumps({"soft_tokens": 90_000, "hard_tokens": 120_000}), encoding="utf-8")
         project_dir = self.home / "projects" / "p"
         project_dir.mkdir(parents=True)
-        (project_dir / "config.json").write_text(json.dumps({"soft_tokens": 80_000}))
+        (project_dir / "config.json").write_text(json.dumps({"soft_tokens": 80_000}), encoding="utf-8")
         with mock.patch.dict(os.environ, {"CONTEXTRAIL_HARD_TOKENS": "110000"}):
             cfg = config.load(project_dir)
         self.assertEqual(cfg["soft_tokens"], 80_000)
@@ -28,7 +28,7 @@ class ConfigTest(TempHome):
         self.home.mkdir(parents=True)
         (self.home / "config.json").write_text(json.dumps({
             "soft_tokens": "lots", "soft_pct": 150, "enabled": "maybe", "inject_on": [1], "unknown": 1,
-        }))
+        }), encoding="utf-8")
         cfg = config.load()
         self.assertEqual(cfg["soft_tokens"], 100_000)
         self.assertEqual(cfg["soft_pct"], 50)
@@ -38,13 +38,13 @@ class ConfigTest(TempHome):
 
     def test_numbers_too_big_for_an_int_are_ignored(self):
         self.home.mkdir(parents=True)
-        (self.home / "config.json").write_text('{"hard_tokens": 1e400}')
+        (self.home / "config.json").write_text('{"hard_tokens": 1e400}', encoding="utf-8")
         self.assertEqual(config.load()["hard_tokens"], 130_000)
-        self.assertEqual(config.problems(), [f"{self.home / 'config.json'}: 'hard_tokens' has an invalid value, Infinity"])
+        self.assertEqual(config.problems(), [f"{config.tilde(self.home / 'config.json')}: 'hard_tokens' has an invalid value, Infinity"])
 
     def test_unreadable_config_falls_back(self):
         self.home.mkdir(parents=True)
-        (self.home / "config.json").write_text("{not json")
+        (self.home / "config.json").write_text("{not json", encoding="utf-8")
         self.assertEqual(config.load()["soft_tokens"], 100_000)
 
     def test_env_parsing(self):
@@ -74,28 +74,28 @@ class ConfigTest(TempHome):
         self.home.mkdir(parents=True)
         (self.home / "config.json").write_text(json.dumps({
             "sof_tokens": 1, "soft_pct": 150, "inject_on": ["startup", "Resume"], "hard_tokens": 120_000,
-        }))
+        }), encoding="utf-8")
         project_dir = self.home / "projects" / "p"
         project_dir.mkdir(parents=True)
-        (project_dir / "config.json").write_text("[1, 2]")
+        (project_dir / "config.json").write_text("[1, 2]", encoding="utf-8")
         env = {"CONTEXTRAIL_SOFT_TOKENS": "lots", "CONTEXTRAIL_DISABLE": "1", "CONTEXTRAIL_WINDOW": "1000000"}
         with mock.patch.dict(os.environ, env):
             found = config.problems(project_dir)
-        path = self.home / "config.json"
+        path = config.tilde(self.home / "config.json")
         self.assertEqual(found, [
             f"{path}: 'sof_tokens' is not a setting (did you mean 'soft_tokens'?)",
             f"{path}: 'soft_pct' has an invalid value, 150",
             f"{path}: 'inject_on' has unknown sources ['Resume']; use startup, resume, clear, compact",
-            f"{project_dir / 'config.json'} must hold a JSON object",
+            f"{config.tilde(project_dir / 'config.json')} must hold a JSON object",
             "CONTEXTRAIL_SOFT_TOKENS has an invalid value, \"lots\"",
             "CONTEXTRAIL_WINDOW is not a setting (did you mean 'window_tokens'?)",
         ])
 
     def test_problems_with_unreadable_json(self):
         self.home.mkdir(parents=True)
-        (self.home / "config.json").write_text("{not json")
+        (self.home / "config.json").write_text("{not json", encoding="utf-8")
         [problem] = config.problems()
-        self.assertTrue(problem.startswith(f"{self.home / 'config.json'} is not valid JSON ("), problem)
+        self.assertTrue(problem.startswith(f"{config.tilde(self.home / 'config.json')} is not valid JSON ("), problem)
 
     def test_thresholds(self):
         cfg = config.load()
@@ -116,7 +116,7 @@ class ConfigTest(TempHome):
 
     def write_config(self, **settings):
         self.home.mkdir(parents=True, exist_ok=True)
-        (self.home / "config.json").write_text(json.dumps(settings))
+        (self.home / "config.json").write_text(json.dumps(settings), encoding="utf-8")
 
     def test_fallback_thresholds_when_none_are_set(self):
         cfg = config.load()
@@ -218,15 +218,15 @@ class ConfigTest(TempHome):
 
     def test_lightning_is_global_only(self):
         self.home.mkdir(parents=True)
-        (self.home / "config.json").write_text(json.dumps({"lightning_tokens": 200_000}))
+        (self.home / "config.json").write_text(json.dumps({"lightning_tokens": 200_000}), encoding="utf-8")
         project_dir = self.home / "projects" / "p"
         project_dir.mkdir(parents=True)
-        (project_dir / "config.json").write_text(json.dumps({"lightning_tokens": 0, "soft_tokens": 80_000}))
+        (project_dir / "config.json").write_text(json.dumps({"lightning_tokens": 0, "soft_tokens": 80_000}), encoding="utf-8")
         cfg = config.load(project_dir)
         self.assertEqual((cfg["lightning_tokens"], cfg["soft_tokens"]), (200_000, 80_000))
         self.assertEqual(
             config.problems(project_dir),
-            [f"{project_dir / 'config.json'}: 'lightning_tokens' works only in {self.home / 'config.json'}"],
+            [f"{config.tilde(project_dir / 'config.json')}: 'lightning_tokens' works only in {config.tilde(self.home / 'config.json')}"],
         )
         with mock.patch.dict(os.environ, {"CONTEXTRAIL_LIGHTNING_TOKENS": "0"}):
             self.assertEqual(config.load(project_dir)["lightning_tokens"], 0)

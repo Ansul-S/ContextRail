@@ -33,7 +33,7 @@ class Base(TempHome):
 
     def write_config(self, **settings):
         self.home.mkdir(parents=True, exist_ok=True)
-        (self.home / "config.json").write_text(json.dumps(settings))
+        (self.home / "config.json").write_text(json.dumps(settings), encoding="utf-8")
 
 
 class RequestStyleTest(Base):
@@ -112,9 +112,9 @@ class RepeatedEventTest(Base):
         self.at_tokens(102_000)
         self.stop(last_assistant_message="ok")
         self.stop(last_assistant_message=block_message())
-        meta, archived = self.project().meta.read_text(), store.archived(self.project())
+        meta, archived = self.project().meta.read_text(encoding="utf-8"), store.archived(self.project())
         self.assertIsNone(self.stop(last_assistant_message=block_message()))
-        self.assertEqual(self.project().meta.read_text(), meta)
+        self.assertEqual(self.project().meta.read_text(encoding="utf-8"), meta)
         self.assertEqual(store.archived(self.project()), archived)
 
     def test_a_new_handoff_from_the_same_session_is_saved(self):
@@ -152,7 +152,7 @@ class FailureTest(Base):
     def test_an_api_error_on_a_request_keeps_the_handoff_and_does_not_count(self):
         self.at_tokens(10_000)
         self.stop(last_assistant_message=block_message())
-        saved = self.project().handoff.read_text()
+        saved = self.project().handoff.read_text(encoding="utf-8")
         self.at_tokens(102_000)
         self.stop(last_assistant_message="ok")
         self.assertEqual(self.entry()["attempts"], 1)
@@ -160,7 +160,7 @@ class FailureTest(Base):
         entry = self.entry()
         self.assertEqual(entry["attempts"], 0)
         self.assertEqual(entry["failure"]["error"], "rate_limit")
-        self.assertEqual(self.project().handoff.read_text(), saved)
+        self.assertEqual(self.project().handoff.read_text(encoding="utf-8"), saved)
         # The next turn that ends normally asks again.
         self.assertIn("<contextrail-handoff>", self.stop(last_assistant_message="ok")["reason"])
 
@@ -181,12 +181,12 @@ class FailureTest(Base):
     def test_giving_up_keeps_the_previous_handoff(self):
         self.at_tokens(10_000)
         self.stop(last_assistant_message=block_message())
-        saved = self.project().handoff.read_text()
+        saved = self.project().handoff.read_text(encoding="utf-8")
         self.at_tokens(102_000)
         for _ in range(config.DEFAULTS["max_attempts"] + 1):
             self.stop(last_assistant_message="no block here")
         self.assertTrue(self.entry()["gave_up"])
-        self.assertEqual(self.project().handoff.read_text(), saved)
+        self.assertEqual(self.project().handoff.read_text(encoding="utf-8"), saved)
         self.assertEqual(store.archived(self.project()), [])
 
     def test_malformed_payloads_never_raise(self):
@@ -255,7 +255,7 @@ class LoadedAsDataTest(Base):
             assistant(10_000),
         ])
         self.stop(last_assistant_message=block_message())
-        (self.repo / "app.py").write_text("print('changed')\n")
+        (self.repo / "app.py").write_text("print('changed')\n", encoding="utf-8")
         out = handlers.on_session_start(self.payload("SessionStart", source="startup", session_id="next"))
         context = out["hookSpecificOutput"]["additionalContext"]
         self.assertIn("The recorded check results are from before these changes", context)
@@ -264,7 +264,7 @@ class LoadedAsDataTest(Base):
         self.at_tokens(10_000)
         self.stop(last_assistant_message=block_message())
         meta = store.read_json(self.project().meta)
-        self.project().meta.write_text(json.dumps(dict(meta, head="0" * 40)))  # a commit no longer in the repository
+        self.project().meta.write_text(json.dumps(dict(meta, head="0" * 40)), encoding="utf-8")  # a commit no longer in the repository
         out = handlers.on_session_start(self.payload("SessionStart", source="startup", session_id="next"))
         self.assertIn("(not fully checked)", out["hookSpecificOutput"]["additionalContext"])
         self.assertIn("changes since couldn't be fully checked", out["systemMessage"])
@@ -273,7 +273,7 @@ class LoadedAsDataTest(Base):
         self.at_tokens(10_000)
         self.stop(last_assistant_message=block_message())
         identity = store.read_json(self.project().identity)
-        self.project().identity.write_text(json.dumps(dict(identity, canonical="/somewhere/else")))
+        self.project().identity.write_text(json.dumps(dict(identity, canonical="/somewhere/else")), encoding="utf-8")
         out = handlers.on_session_start(self.payload("SessionStart", source="startup"))
         self.assertNotIn("hookSpecificOutput", out)
         self.assertIn("didn't load the saved handoff", out["systemMessage"])

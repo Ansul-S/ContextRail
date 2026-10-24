@@ -121,13 +121,13 @@ def write_transcript(path: Path, entries: List[Dict[str, Any]]) -> str:
 
 
 def git(repo: Path, *args: str) -> str:
-    return subprocess.run([*GIT, *args], cwd=repo, check=True, capture_output=True, text=True).stdout
+    return subprocess.run([*GIT, *args], cwd=repo, check=True, capture_output=True, text=True, encoding="utf-8").stdout
 
 
 def make_repo(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     git(path, "init", "-q", "-b", "main")
-    (path / "app.py").write_text("print('hello')\n")
+    (path / "app.py").write_text("print('hello')\n", encoding="utf-8")
     git(path, "add", ".")
     git(path, "commit", "-q", "-m", "initial commit")
     return path

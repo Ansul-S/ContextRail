@@ -76,8 +76,11 @@ class Project:
 
     def legacy_dirs(self) -> List[Path]:
         """Where ContextRail 0.6 and earlier kept this project's files."""
-        names = dict.fromkeys([claude_slug(self.root), claude_slug(Path(self.key))])
-        return [self.home / "projects" / name for name in names]
+        names: Dict[str, str] = {}
+        for name in (claude_slug(self.root), claude_slug(Path(self.key))):
+            # On Windows the key is case-folded, so the two names can differ only in case: one folder.
+            names.setdefault(os.path.normcase(name), name)
+        return [self.home / "projects" / name for name in names.values()]
 
 
 def sha256(text: str) -> str:

@@ -3,7 +3,7 @@ import os
 import time
 from unittest import mock
 
-from contextrail import handlers, handoff, prompts, store, usage
+from contextrail import config, handlers, handoff, prompts, store, usage
 from tests.helpers import START, VALID_BODY, TempHome, assistant, git, tool_result, tool_use, user, write_transcript
 from tests.test_usage import append_later
 
@@ -119,12 +119,12 @@ class StopTest(TempHome):
         self.assertIn("/clear", out["systemMessage"])
 
         project = self.project()
-        document = project.handoff.read_text()
+        document = project.handoff.read_text(encoding="utf-8")
         self.assertIn("# Handoff: repo", document)
         self.assertIn("- Branch `main` at", document)
         self.assertIn("## Next steps", document)
-        self.assertEqual(project.resume.read_text().strip(), VALID_BODY.split("## Resume prompt\n")[1])
-        meta = json.loads(project.meta.read_text())
+        self.assertEqual(project.resume.read_text(encoding="utf-8").strip(), VALID_BODY.split("## Resume prompt\n")[1])
+        meta = json.loads(project.meta.read_text(encoding="utf-8"))
         self.assertEqual(meta["tokens"], 102_000)
         self.assertEqual(meta["session_id"], "session-1")
 
@@ -213,10 +213,10 @@ class StopTest(TempHome):
 
         out = self.stop(last_assistant_message=bad, stop_hook_active=True)
         self.assertIn("Saved with problems", out["systemMessage"])
-        self.assertIn("> Saved with problems", self.project().handoff.read_text())
+        self.assertIn("> Saved with problems", self.project().handoff.read_text(encoding="utf-8"))
 
     def test_checks_the_handoff_against_the_session(self):
-        (self.repo / "extra.py").write_text("x = 1\n")
+        (self.repo / "extra.py").write_text("x = 1\n", encoding="utf-8")
         write_transcript(self.transcript, [
             user(), tool_use("t1", "Write", {"file_path": str(self.repo / "extra.py")}, tokens=102_000), tool_result("t1"),
         ])
@@ -225,11 +225,11 @@ class StopTest(TempHome):
         self.assertIn("- mention or explain these uncommitted files edited in this session: `extra.py`", out["reason"])
         out = self.stop(last_assistant_message=block_message(), stop_hook_active=True)
         self.assertIn("Saved with problems: mention or explain", out["systemMessage"])
-        self.assertIn("> Saved with problems: mention or explain", self.project().handoff.read_text())
-        self.assertIn("- Edited this session: `extra.py`", self.project().handoff.read_text())
+        self.assertIn("> Saved with problems: mention or explain", self.project().handoff.read_text(encoding="utf-8"))
+        self.assertIn("- Edited this session: `extra.py`", self.project().handoff.read_text(encoding="utf-8"))
 
     def test_content_checks_can_be_turned_off(self):
-        (self.repo / "extra.py").write_text("x = 1\n")
+        (self.repo / "extra.py").write_text("x = 1\n", encoding="utf-8")
         write_transcript(self.transcript, [
             user(), tool_use("t1", "Write", {"file_path": str(self.repo / "extra.py")}, tokens=102_000), tool_result("t1"),
         ])
@@ -390,9 +390,9 @@ class StopTest(TempHome):
             for i in range(5):
                 meta_path = self.project().meta
                 if meta_path.exists():  # give each save a distinct timestamp
-                    meta = json.loads(meta_path.read_text())
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
                     meta["saved_at"] = f"2026-01-0{i}T10:00:00+00:00"
-                    meta_path.write_text(json.dumps(meta))
+                    meta_path.write_text(json.dumps(meta), encoding="utf-8")
                 # A different handoff each time: the same one from the same event is saved once.
                 self.stop(last_assistant_message=block_message(VALID_BODY.replace("rate limiting", f"rate limiting {i}")))
         archived = sorted(p.name for p in self.project().history.glob("*.md"))
@@ -455,16 +455,16 @@ class PreCompactTest(TempHome):
         self.at_tokens(50_000)
         handlers.on_stop(self.payload("Stop", session_id="earlier", last_assistant_message=block_message()))
         project = store.Project(self.repo)
-        first_saved = json.loads(project.meta.read_text())["saved_at"]
+        first_saved = json.loads(project.meta.read_text(encoding="utf-8"))["saved_at"]
 
         self.at_tokens(160_000)
         out = handlers.on_pre_compact(self.payload("PreCompact", trigger="auto"))
         self.assertIn("before compaction", out["systemMessage"])
-        document = project.handoff.read_text()
+        document = project.handoff.read_text(encoding="utf-8")
         self.assertIn("Saved automatically before automatic compaction", document)
         self.assertIn(f"Carried over from the previous handoff (saved {first_saved})", document)
         self.assertIn("## Next steps", document)
-        self.assertEqual(json.loads(project.meta.read_text())["narrative_saved_at"], first_saved)
+        self.assertEqual(json.loads(project.meta.read_text(encoding="utf-8"))["narrative_saved_at"], first_saved)
         self.assertEqual(len(list(project.history.glob("*.md"))), 1)
 
     def test_skips_when_this_session_saved_recently_and_resets_tracking(self):
@@ -492,14 +492,14 @@ class PreCompactTest(TempHome):
     def test_stub_when_no_previous_handoff(self):
         self.at_tokens(160_000)
         handlers.on_pre_compact(self.payload("PreCompact", trigger="manual"))
-        document = store.Project(self.repo).handoff.read_text()
+        document = store.Project(self.repo).handoff.read_text(encoding="utf-8")
         self.assertIn("before manual compaction", document)
         self.assertIn("Not recorded", document)
 
 
 class SessionEndTest(TempHome):
     def edit_session(self, tokens, start=START):
-        (self.repo / "app.py").write_text("print('edited')\n")
+        (self.repo / "app.py").write_text("print('edited')\n", encoding="utf-8")
         write_transcript(self.transcript, [
             user(), assistant(start),
             tool_use("t1", "Edit", {"file_path": str(self.repo / "app.py")}, tokens=tokens), tool_result("t1"),
@@ -514,7 +514,7 @@ class SessionEndTest(TempHome):
     def test_checkpoint_when_a_session_with_edits_ends_without_a_handoff(self):
         self.edit_session(45_000)
         self.assertIsNone(self.end("prompt_input_exit"))
-        document = self.project().handoff.read_text()
+        document = self.project().handoff.read_text(encoding="utf-8")
         self.assertIn("> Session ended (`prompt_input_exit`) without a handoff.", document)
         self.assertIn("- Edited this session: `app.py`", document)
         self.assertIn("Not recorded: this handoff was saved automatically when the session ended.", document)
@@ -529,7 +529,7 @@ class SessionEndTest(TempHome):
         handlers.on_stop(self.payload("Stop", session_id="earlier", last_assistant_message=block_message()))
         self.edit_session(45_000)
         self.end()
-        document = self.project().handoff.read_text()
+        document = self.project().handoff.read_text(encoding="utf-8")
         self.assertIn(handoff.CARRIED_OVER, document)
         self.assertTrue(handoff.narrative_of(document).endswith(VALID_BODY))
         self.assertEqual(len(store.archived(self.project())), 1)
@@ -537,18 +537,18 @@ class SessionEndTest(TempHome):
     def test_no_checkpoint_after_a_recent_handoff_or_below_the_minimum(self):
         self.edit_session(102_000)
         handlers.on_stop(self.payload("Stop", last_assistant_message=block_message()))
-        saved = self.project().handoff.read_text()
+        saved = self.project().handoff.read_text(encoding="utf-8")
         self.edit_session(120_000)
         self.end()
-        self.assertEqual(self.project().handoff.read_text(), saved)
+        self.assertEqual(self.project().handoff.read_text(encoding="utf-8"), saved)
         self.edit_session(150_000)  # past refresh_tokens since that handoff
         self.end()
-        self.assertIn("Session ended (`clear`)", self.project().handoff.read_text())
+        self.assertIn("Session ended (`clear`)", self.project().handoff.read_text(encoding="utf-8"))
         other = self.payload("SessionEnd", session_id="short", reason="clear")
         self.edit_session(29_000)
-        project_before = self.project().handoff.read_text()
+        project_before = self.project().handoff.read_text(encoding="utf-8")
         handlers.on_session_end(other)
-        self.assertEqual(self.project().handoff.read_text(), project_before)
+        self.assertEqual(self.project().handoff.read_text(encoding="utf-8"), project_before)
 
     def test_minimum_counts_from_the_session_start(self):
         self.edit_session(79_000, start=50_000)
@@ -596,7 +596,7 @@ class SessionStartTest(TempHome):
             self.assertIn("- None detected.", context)
             self.assertNotIn("<contextrail-handoff>", context)
             self.assertNotIn(prompts.SHORTENED, context)
-            self.assertIn(handoff.narrative_of(self.project().handoff.read_text()), context)
+            self.assertIn(handoff.narrative_of(self.project().handoff.read_text(encoding="utf-8")), context)
             self.assertIn("loaded the handoff saved just now (no repo changes since).", out["systemMessage"])
 
     def test_a_long_handoff_loads_shortened_under_claude_codes_limit(self):
@@ -605,12 +605,12 @@ class SessionStartTest(TempHome):
         self.at_tokens(102_000)
         with mock.patch.dict(os.environ, {"CONTEXTRAIL_MAX_CHARS": "50000"}):
             handlers.on_stop(self.payload("Stop", last_assistant_message=block_message(body)))
-        self.assertGreater(handoff.units(self.project().handoff.read_text()), handlers.MAX_CONTEXT)
+        self.assertGreater(handoff.units(self.project().handoff.read_text(encoding="utf-8")), handlers.MAX_CONTEXT)
         out = self.start("clear")
         context = out["hookSpecificOutput"]["additionalContext"]
         self.assertLessEqual(handoff.units(context), handlers.MAX_CONTEXT)
         self.assertIn(f"- {prompts.SHORTENED}: ", context)
-        self.assertIn(f"Read {self.project().handoff} when you need them.", context)
+        self.assertIn(f"Read {config.tilde(self.project().handoff)} when you need them.", context)
         self.assertIn("- Fact 0: ", context)
         self.assertRegex(context, r"\n- … \d+ more in the full handoff\n")
         for key in ("goal", "users rules", "in progress", "next steps", "verify first", "resume prompt"):
@@ -623,7 +623,7 @@ class SessionStartTest(TempHome):
 
     def test_reports_drift(self):
         self.save()
-        (self.repo / "app.py").write_text("print('v2')\n")
+        (self.repo / "app.py").write_text("print('v2')\n", encoding="utf-8")
         git(self.repo, "commit", "-qam", "follow-up fix")
         out = self.start("clear")
         context = out["hookSpecificOutput"]["additionalContext"]
@@ -635,12 +635,12 @@ class SessionStartTest(TempHome):
     def test_flags_items_naming_a_changed_file(self):
         (self.repo / "api").mkdir()
         for name in ("api/limits.py", "api/app.py", "README.md"):
-            (self.repo / name).write_text("x = 1\n")
+            (self.repo / name).write_text("x = 1\n", encoding="utf-8")
         git(self.repo, "add", ".")
         git(self.repo, "commit", "-qm", "api")
         self.save()
         for name in ("api/limits.py", "README.md"):
-            (self.repo / name).write_text("x = 2\n")
+            (self.repo / name).write_text("x = 2\n", encoding="utf-8")
         git(self.repo, "commit", "-qam", "tweak")
         context = self.start("clear")["hookSpecificOutput"]["additionalContext"]
         self.assertIn("- Files changed since the handoff (2): README.md, api/limits.py.", context)
@@ -655,7 +655,7 @@ class SessionStartTest(TempHome):
         folder.mkdir(parents=True)
         names = [f"module_with_a_long_name_{i}.py" for i in range(30)]
         for name in names[:5]:
-            (folder / name).write_text("draft\n")  # uncommitted at the handoff, committed later
+            (folder / name).write_text("draft\n", encoding="utf-8")  # uncommitted at the handoff, committed later
         done = "".join(f"- Finished the long description of the work in {name}.\n" for name in names)
         self.at_tokens(102_000)
         handlers.on_stop(self.payload("Stop", last_assistant_message=block_message(
@@ -664,7 +664,7 @@ class SessionStartTest(TempHome):
         git(self.repo, "add", ".")
         git(self.repo, "commit", "-qm", "Commit the drafts as they were")
         for i, name in enumerate(names[5:]):
-            (folder / name).write_text(f"n = {i}\n")
+            (folder / name).write_text(f"n = {i}\n", encoding="utf-8")
             git(self.repo, "add", ".")
             git(self.repo, "commit", "-qm", f"Change number {i} with a commit subject long enough to need cutting")
         context = self.start("clear")["hookSpecificOutput"]["additionalContext"]
@@ -677,9 +677,9 @@ class SessionStartTest(TempHome):
     def test_skips_stale_handoffs(self):
         self.save()
         meta_path = store.Project(self.repo).meta
-        meta = json.loads(meta_path.read_text())
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
         meta["saved_at"] = "2020-01-01T00:00:00+00:00"
-        meta_path.write_text(json.dumps(meta))
+        meta_path.write_text(json.dumps(meta), encoding="utf-8")
         self.assertIsNone(self.start("startup"))
 
     def test_same_project_from_a_subdirectory(self):
@@ -701,15 +701,15 @@ class AgeTest(TempHome):
 
 class HeartbeatTest(TempHome):
     def beats(self):
-        return json.loads((self.home / handlers.HEARTBEAT).read_text())
+        return json.loads((self.home / handlers.HEARTBEAT).read_text(encoding="utf-8"))
 
     def test_written_at_most_once_a_minute(self):
         handlers.heartbeat("Stop")
         first = self.beats()["Stop"]
-        (self.home / handlers.HEARTBEAT).write_text(json.dumps({"Stop": first - 30}))
+        (self.home / handlers.HEARTBEAT).write_text(json.dumps({"Stop": first - 30}), encoding="utf-8")
         handlers.heartbeat("Stop")
         self.assertEqual(self.beats(), {"Stop": first - 30})
-        (self.home / handlers.HEARTBEAT).write_text(json.dumps({"Stop": first - 61}))
+        (self.home / handlers.HEARTBEAT).write_text(json.dumps({"Stop": first - 61}), encoding="utf-8")
         handlers.heartbeat("Stop")
         handlers.heartbeat("PreCompact")
         self.assertEqual(sorted(self.beats()), ["PreCompact", "Stop"])

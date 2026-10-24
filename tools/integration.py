@@ -55,7 +55,7 @@ def run_claude(claude: str, model: str, prompt: str, cwd: Path, env: Dict[str, s
         claude, "-p", prompt, "--model", model, "--output-format", "json", "--plugin-dir", str(ROOT),
         "--settings", SETTINGS, "--strict-mcp-config", "--tools", "",
     ]
-    result = subprocess.run(argv, cwd=str(cwd), env=env, capture_output=True, text=True, timeout=600)
+    result = subprocess.run(argv, cwd=str(cwd), env=env, capture_output=True, encoding="utf-8", errors="replace", timeout=600)
     try:
         output = json.loads(result.stdout)
     except ValueError:

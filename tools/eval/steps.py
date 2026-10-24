@@ -128,7 +128,7 @@ class EvalError(Exception):
 
 def run_process(argv: List[str], stdin: str, cwd: Path, env: Dict[str, str]) -> str:
     try:
-        done = subprocess.run(argv, input=stdin, cwd=cwd, env=env, capture_output=True, text=True, timeout=TIMEOUT)
+        done = subprocess.run(argv, input=stdin, cwd=cwd, env=env, capture_output=True, encoding="utf-8", errors="replace", timeout=TIMEOUT)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise EvalError(f"{' '.join(argv[:2])} did not finish: {error}") from error
     if not done.stdout.strip():

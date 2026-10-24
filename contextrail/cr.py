@@ -40,6 +40,16 @@ def log_error() -> None:
         pass
 
 
+def utf8_output() -> None:
+    """Claude Code reads what the hooks, commands and status line print as UTF-8. Without this,
+    Windows would write the console's code page, which lacks characters such as the rail's."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace", newline="\n")
+        except (AttributeError, ValueError, OSError):
+            pass  # not a text stream (a test's replacement), or no stream at all
+
+
 def run_statusline(args):
     """The status line must keep working: errors are logged, and the wrapped command still runs."""
     from contextrail import statusline
@@ -59,6 +69,7 @@ def run_statusline(args):
 
 
 def main(argv):
+    utf8_output()
     if len(argv) < 2 or argv[1] in ("-h", "--help"):
         print(__doc__.strip())
         return 0
@@ -75,7 +86,8 @@ def main(argv):
     event, handler = handlers.HOOKS[argv[1]]
     try:
         try:
-            payload = json.loads(sys.stdin.read() or "{}")
+            # Bytes, not the platform's text encoding: Claude Code sends UTF-8 on Windows too.
+            payload = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace") or "{}")
         except ValueError:
             log_error()
             payload = None

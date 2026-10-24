@@ -6,12 +6,14 @@ import shlex
 import subprocess
 import sys
 import time
+import unittest
 from unittest import mock
 
 from contextrail import doctor, handlers, status, statusline, store, usage
 from tests.helpers import CR, ROOT, TempHome, assistant, user, write_transcript
 
 SESSION = "ba911651-67f8-4392-8840-ee7852f17155"
+POSIX_SHELL = "wrapping a status line runs it through a POSIX shell, so it works on macOS and Linux only"
 INNER = "import json, sys; print(json.load(sys.stdin)['model']['display_name']); sys.exit(len(sys.argv) - 1)"
 
 
@@ -42,7 +44,7 @@ class StatusLineTest(TempHome):
     def setUp(self):
         super().setUp()
         self.inner = self.tmp / "inner.py"
-        self.inner.write_text(INNER)
+        self.inner.write_text(INNER, encoding="utf-8")
         os.environ.update(NO_COLOR="1", COLUMNS="120")  # TempHome restores the environment
 
     def status_input(self, **extra):
@@ -68,6 +70,7 @@ class StatusLineTest(TempHome):
         self.assertEqual((report["window"], report["used_pct"]), (1_000_000, 5))
         self.assertLess(abs(time.time() - report["ts"]), 30)
 
+    @unittest.skipIf(os.name == "nt", POSIX_SHELL)
     def test_passes_the_wrapped_status_line_through(self):
         line = f"{shlex.quote(sys.executable)} {shlex.quote(str(self.inner))} | tr a-z A-Z"
         result = self.run_cr("--", line, stdin=self.status_input())
@@ -77,6 +80,7 @@ class StatusLineTest(TempHome):
         result = self.run_cr("--", sys.executable, str(self.inner), "x", "y", stdin=self.status_input())
         self.assertEqual((result.returncode, result.stdout), (2, b"Haiku 5.5\n"))
 
+    @unittest.skipIf(os.name == "nt", POSIX_SHELL)
     def test_a_slow_wrapped_command_is_cut_off(self):
         with mock.patch.object(statusline, "INNER_TIMEOUT", 0.3):
             start = time.time()
@@ -102,7 +106,7 @@ class StatusLineTest(TempHome):
         sessions.mkdir(parents=True)
         old, recent = sessions / "old.json", sessions / "recent.json"
         for path, days in ((old, 8), (recent, 1)):
-            path.write_text('{"window": 200000, "ts": 1}')
+            path.write_text('{"window": 200000, "ts": 1}', encoding="utf-8")
             stamp = time.time() - days * 86_400
             os.utime(path, (stamp, stamp))
         statusline.record(sample(str(self.repo)))
@@ -138,7 +142,7 @@ class StatusLineTest(TempHome):
         project = self.set_session(saved_tokens=102_000)
         self.assertIn("  112k · ✓ saved · next at 142k ·", self.line_at(112_000))
         project.handoff.parent.mkdir(parents=True, exist_ok=True)
-        project.handoff.write_text("# Handoff\n")
+        project.handoff.write_text("# Handoff\n", encoding="utf-8")
         stamp = time.time() - 190
         os.utime(project.handoff, (stamp, stamp))
         self.assertEqual(
@@ -252,7 +256,7 @@ class WindowSourceTest(TempHome):
         self.assertEqual(usage.last_usage(str(self.transcript)).window_source, "statusline")
         self.assertEqual(usage.last_usage(str(self.transcript), 500_000).window_source, "config")
         report = self.home / "sessions" / f"{self.transcript.stem}.json"
-        report.write_text(json.dumps({"window": 200_000, "ts": time.time() - 25 * 3600}))
+        report.write_text(json.dumps({"window": 200_000, "ts": time.time() - 25 * 3600}), encoding="utf-8")
         self.assertEqual(usage.last_usage(str(self.transcript)).window_source, "model")
 
     def test_status_and_doctor_name_the_source(self):
@@ -273,10 +277,11 @@ class PluginRootTest(TempHome):
         handlers.on_session_start({"cwd": str(self.repo), "source": "startup", "session_id": "doctor"})
         self.assertFalse((self.home / "plugin-root").exists())
         payload = json.dumps(self.payload("SessionStart", source="startup"))
-        subprocess.run([sys.executable, str(CR), "session-start"], input=payload, text=True, env=dict(os.environ), timeout=30)
-        self.assertEqual((self.home / "plugin-root").read_text().strip(), str(ROOT))
+        subprocess.run([sys.executable, str(CR), "session-start"], input=payload, text=True, env=dict(os.environ), timeout=30, encoding="utf-8")
+        self.assertEqual((self.home / "plugin-root").read_text(encoding="utf-8").strip(), str(ROOT))
 
 
+@unittest.skipIf(os.name == "nt", "the status-line launcher is a shell script, so it works on macOS and Linux only")
 class SetupTest(TempHome):
     def setup_statusline(self):
         with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
@@ -286,7 +291,7 @@ class SetupTest(TempHome):
     def write_settings(self, settings):
         self.claude.mkdir(parents=True, exist_ok=True)
         path = self.claude / "settings.json"
-        path.write_text(json.dumps(settings, indent=2))
+        path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
         return path
 
     def run_line(self, command, stdin):
@@ -322,7 +327,7 @@ class SetupTest(TempHome):
         self.assertEqual(code, 0)
         self.assertIn(json.dumps({"type": "command", "command": str(self.home / "bin" / "statusline")}), out)
         self.assertIn(statusline.EXAMPLE, out)
-        self.write_settings({}).write_text("{")
+        self.write_settings({}).write_text("{", encoding="utf-8")
         code, out = self.setup_statusline()
         self.assertEqual(code, 1)
         self.assertIn("settings.json can't be read", out)

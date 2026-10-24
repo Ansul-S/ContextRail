@@ -65,7 +65,7 @@ class IdentityTest(TempHome):
         save(project, "handoff")
         identity = store.read_json(project.identity)
         identity["canonical"] = "/somewhere/else"
-        project.identity.write_text(json.dumps(identity))
+        project.identity.write_text(json.dumps(identity), encoding="utf-8")
         document, meta, problems = store.read_handoff(project)
         self.assertIsNone(document)
         self.assertIn("belongs to /somewhere/else", problems[0])
@@ -78,13 +78,13 @@ class IdentityTest(TempHome):
         project = store.open_project(self.repo)
         save(project, "handoff")
         meta = store.read_json(project.meta)
-        project.meta.write_text(json.dumps(dict(meta, project="/somewhere/else")))
+        project.meta.write_text(json.dumps(dict(meta, project="/somewhere/else")), encoding="utf-8")
         self.assertEqual(store.read_handoff(project), (None, {}, ["its meta.json names another project, /somewhere/else"]))
 
     def test_meta_of_another_document_is_dropped_but_the_document_kept(self):
         project = store.open_project(self.repo)
         save(project, "_Saved 2026-01-01T10:00:00+00:00, at 5 tokens._\nfirst")
-        project.handoff.write_text("_Saved 2026-01-02T10:00:00+00:00, at 5 tokens._\nedited")
+        project.handoff.write_text("_Saved 2026-01-02T10:00:00+00:00, at 5 tokens._\nedited", encoding="utf-8")
         document, meta, problems = store.read_handoff(project)
         self.assertIn("edited", document)
         self.assertEqual(meta, {"saved_at": "2026-01-02T10:00:00+00:00"})
@@ -97,10 +97,10 @@ class LegacyTest(TempHome):
     def legacy(self, root, meta):
         folder = self.home / "projects" / store.claude_slug(root)
         (folder / "history").mkdir(parents=True)
-        (folder / "HANDOFF.md").write_text("old handoff")
-        (folder / "meta.json").write_text(json.dumps(meta))
-        (folder / "state.json").write_text(json.dumps({"sessions": {"s": {"attempts": 1}}}))
-        (folder / "history" / "2026-01-01T10-00-00.md").write_text("older handoff")
+        (folder / "HANDOFF.md").write_text("old handoff", encoding="utf-8")
+        (folder / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        (folder / "state.json").write_text(json.dumps({"sessions": {"s": {"attempts": 1}}}), encoding="utf-8")
+        (folder / "history" / "2026-01-01T10-00-00.md").write_text("older handoff", encoding="utf-8")
         return folder
 
     def session_ran_in(self, cwd, session_id="legacy-session"):
@@ -114,7 +114,7 @@ class LegacyTest(TempHome):
         folder = self.legacy(self.repo, {"saved_at": "2026-01-01T10:00:00+00:00", "head": head[:9]})
         project = store.open_project(self.repo)
         self.assertFalse(folder.exists())
-        self.assertEqual(project.handoff.read_text(), "old handoff")
+        self.assertEqual(project.handoff.read_text(encoding="utf-8"), "old handoff")
         self.assertEqual([p.name for p in store.archived(project)], ["2026-01-01T10-00-00.md"])
         self.assertEqual(store.load_state(project)["sessions"]["s"]["attempts"], 1)
         identity = store.read_json(project.identity)
@@ -124,9 +124,9 @@ class LegacyTest(TempHome):
         self.assertEqual(store.read_handoff(project)[0], "old handoff")
         self.assertEqual(store.unclaimed_legacy(project), [])
         # Opening it again moves nothing and changes nothing.
-        before = project.identity.read_text()
+        before = project.identity.read_text(encoding="utf-8")
         self.assertIsNone(store.adopt_legacy(store.open_project(self.repo)))
-        self.assertEqual(project.identity.read_text(), before)
+        self.assertEqual(project.identity.read_text(encoding="utf-8"), before)
 
     def test_moved_when_the_session_that_saved_it_ran_here(self):
         sid = self.session_ran_in(self.repo)
@@ -134,6 +134,13 @@ class LegacyTest(TempHome):
         project = store.open_project(self.repo)
         self.assertFalse(folder.exists())
         self.assertEqual(store.read_json(project.identity)["migrated_because"], "the session that saved it ran here")
+
+    def test_one_folder_when_the_names_differ_only_in_case(self):
+        root = self.tmp / "MyApp"
+        root.mkdir()
+        with mock.patch("os.path.normcase", str.lower):  # Windows folds the case of the canonical path
+            project = store.Project(root)
+            self.assertEqual(project.legacy_dirs(), [self.home / "projects" / store.claude_slug(root)])
 
     def test_left_for_the_project_whose_session_saved_it(self):
         nested = make_repo(self.tmp / "work" / "app" / "api")
@@ -203,14 +210,14 @@ class PrivacyTest(TempHome):
         projects.mkdir(parents=True)
         for folder in (self.home, self.home / "projects", projects):
             folder.chmod(0o755)
-        (projects / "HANDOFF.md").write_text("handoff")
+        (projects / "HANDOFF.md").write_text("handoff", encoding="utf-8")
         (projects / "HANDOFF.md").chmod(0o644)
         (self.home / "bin").mkdir()
         launcher = self.home / "bin" / "statusline"
-        launcher.write_text("#!/bin/sh\n")
+        launcher.write_text("#!/bin/sh\n", encoding="utf-8")
         launcher.chmod(0o755)
         outside = self.tmp / "not-ours.txt"
-        outside.write_text("x")
+        outside.write_text("x", encoding="utf-8")
         outside.chmod(0o644)
         (self.home / "link").symlink_to(outside)
 
@@ -230,7 +237,7 @@ class PrivacyTest(TempHome):
         with mock.patch.object(store.os, "replace", side_effect=OSError(28, "No space left on device")):
             with self.assertRaises(OSError):
                 store.write_atomic(path, "new")
-        self.assertEqual(path.read_text(), "old")
+        self.assertEqual(path.read_text(encoding="utf-8"), "old")
         self.assertEqual([p.name for p in self.home.iterdir()], ["data.json"])
 
 
@@ -244,7 +251,7 @@ if sys.argv[3] == "exclusive":
 path = Path(sys.argv[1])
 for _ in range(int(sys.argv[2])):
     with store.lock_file(path.with_name("counter.lock")):
-        count = json.loads(path.read_text()) if path.exists() else 0
+        count = json.loads(path.read_text(encoding="utf-8")) if path.exists() else 0
         time.sleep(0.002)
         store.write_atomic(path, json.dumps(count + 1))
 """
@@ -279,14 +286,14 @@ class LockTest(TempHome):
             with self.subTest(kind=kind):
                 path = self.home / f"counter-{kind}.json"
                 self.processes(COUNTER, str(path), "25", kind)
-                self.assertEqual(json.loads(path.read_text()), 100)
+                self.assertEqual(json.loads(path.read_text(encoding="utf-8")), 100)
 
     def test_concurrent_saves_keep_every_handoff(self):
         self.processes(SAVER, str(self.repo), "5")
         project = store.open_project(self.repo)
         document, meta, problems = store.read_handoff(project)
         self.assertEqual(problems, [])
-        kept = [document] + [path.read_text() for path in store.archived(project)]
+        kept = [document] + [path.read_text(encoding="utf-8") for path in store.archived(project)]
         self.assertEqual(sorted(kept), sorted(f"handoff {p}-{n}" for p in range(4) for n in range(5)))
         self.assertEqual(meta["document_sha256"], store.sha256(document))
         self.assertEqual(list(project.dir.glob(".*.tmp")) + list(project.history.glob(".*.tmp")), [])
@@ -308,12 +315,12 @@ class LockTest(TempHome):
         path = self.home / "x.lock"
         held = path.with_name("x.lock.held")
         self.home.mkdir(parents=True)
-        held.write_text("12345")
+        held.write_text("12345", encoding="utf-8")
         old = time.time() - store.STALE_LOCK - 5
         os.utime(held, (old, old))
         with mock.patch.object(store, "_lock_kind", return_value="exclusive"):
             with store.lock_file(path, timeout=0.5):
-                self.assertEqual(held.read_text(), str(os.getpid()))
+                self.assertEqual(held.read_text(encoding="utf-8"), str(os.getpid()))
         self.assertFalse(held.exists())
 
 
@@ -336,7 +343,7 @@ class CrashSafeSaveTest(TempHome):
             save(project, "second", saved_at="2026-01-02T10:00:00+00:00")
         self.assertEqual(store.read_handoff(project)[0], "first")
         self.assertEqual(store.read_handoff(project)[2], [])
-        self.assertEqual([p.read_text() for p in store.archived(project)], ["first"])
+        self.assertEqual([p.read_text(encoding="utf-8") for p in store.archived(project)], ["first"])
 
     def test_stopped_between_the_handoff_and_its_meta(self):
         project = store.open_project(self.repo)
@@ -347,7 +354,7 @@ class CrashSafeSaveTest(TempHome):
         self.assertIn("second", document)
         self.assertEqual(meta, {"saved_at": "2026-01-02T10:00:00+00:00"})
         self.assertEqual(problems, ["meta.json describes a different handoff"])
-        self.assertIn("first", store.archived(project)[0].read_text())
+        self.assertIn("first", store.archived(project)[0].read_text(encoding="utf-8"))
 
     def test_the_lock_is_released_when_a_save_fails(self):
         project = store.open_project(self.repo)

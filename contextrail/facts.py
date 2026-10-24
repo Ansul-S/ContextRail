@@ -73,7 +73,8 @@ def run_git(args: List[str], cwd: Path, stdin: Optional[str] = None) -> Optional
     """Raw stdout of a git command, or None if git fails or is missing."""
     try:
         result = subprocess.run(
-            ["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=5, input=stdin
+            ["git", *args], cwd=str(cwd), capture_output=True, encoding="utf-8", errors="replace",
+            timeout=5, input=stdin,
         )
     except (OSError, subprocess.SubprocessError):
         return None

@@ -25,7 +25,7 @@ class PurgeTest(TempHome):
     def test_lists_first_and_deletes_only_with_yes(self):
         self.save()
         self.save(step="second")
-        (self.project().dir / "config.json").write_text(json.dumps({"soft_tokens": 50_000}))
+        (self.project().dir / "config.json").write_text(json.dumps({"soft_tokens": 50_000}), encoding="utf-8")
         code, out = self.purge()
         self.assertEqual(code, 0)
         self.assertIn("would delete this project's handoffs and session state", out)
@@ -67,8 +67,8 @@ class PurgeTest(TempHome):
         self.save(root=other)
         sessions = self.home / "sessions"
         sessions.mkdir()
-        (sessions / "old.json").write_text("{}")
-        (sessions / "new.json").write_text("{}")
+        (sessions / "old.json").write_text("{}", encoding="utf-8")
+        (sessions / "new.json").write_text("{}", encoding="utf-8")
         old = time.time() - 40 * 86_400
         for path in [*self.project(other).dir.rglob("*"), sessions / "old.json"]:
             os.utime(path, (old, old))
@@ -82,15 +82,15 @@ class PurgeTest(TempHome):
 
     def test_everything_but_the_settings(self):
         self.save()
-        (self.home / "config.json").write_text(json.dumps({"lightning_tokens": 300_000}))
-        (self.home / "error.log").write_text("x")
+        (self.home / "config.json").write_text(json.dumps({"lightning_tokens": 300_000}), encoding="utf-8")
+        (self.home / "error.log").write_text("x", encoding="utf-8")
         self.purge("--everything", "--yes")
         self.assertEqual(sorted(path.name for path in self.home.iterdir()), ["config.json"])
 
     def test_legacy_folder_left_in_place(self):
         legacy = self.home / "projects" / store.claude_slug(self.repo)
         legacy.mkdir(parents=True)
-        (legacy / "meta.json").write_text(json.dumps({"head": "deadbeef" * 5}))
+        (legacy / "meta.json").write_text(json.dumps({"head": "deadbeef" * 5}), encoding="utf-8")
         self.project()  # declines it: that commit is not in this repository
         self.assertTrue(legacy.exists())
         self.assertIn(legacy.name, self.purge("--legacy")[1])
@@ -108,7 +108,7 @@ class PurgeTest(TempHome):
     def test_an_old_error_log_goes_at_a_session_start(self):
         self.home.mkdir(parents=True)
         log = self.home / "error.log"
-        log.write_text("old")
+        log.write_text("old", encoding="utf-8")
         purge.retention()
         self.assertTrue(log.exists())
         old = time.time() - (purge.ERROR_LOG_DAYS + 1) * 86_400

@@ -14,7 +14,7 @@ class ReverseLinesTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "f.txt"
             lines = [f"line {i} " + "x" * (i * 37 % 500) for i in range(2000)]
-            path.write_text("\n".join(lines) + "\n")
+            path.write_bytes(("\n".join(lines) + "\n").encode())
             original = usage.CHUNK
             usage.CHUNK = 1024
             try:
@@ -27,7 +27,7 @@ class ReverseLinesTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "f.txt"
             long_line = "y" * 10_000
-            path.write_text(f"first\n{long_line}\nlast")
+            path.write_bytes(f"first\n{long_line}\nlast".encode())
             original = usage.CHUNK
             usage.CHUNK = 512
             try:
@@ -39,7 +39,7 @@ class ReverseLinesTest(unittest.TestCase):
     def test_scan_limit_drops_the_partial_line(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "f.txt"
-            path.write_text("a" * 100 + "\nshort\n")
+            path.write_bytes(b"a" * 100 + b"\nshort\n")
             got = [line.decode() for line in usage.reverse_lines(str(path), max_bytes=20)]
             self.assertEqual(got, ["short"])
 

@@ -78,7 +78,9 @@ def check_python() -> Result:
     shown = tilde(Path(python))
 
     def run(*args: str) -> subprocess.CompletedProcess:
-        return subprocess.run([python, *args], capture_output=True, text=True, timeout=20, env=env)
+        return subprocess.run(
+            [python, *args], capture_output=True, encoding="utf-8", errors="replace", timeout=20, env=env
+        )
 
     try:
         version = run("-c", "import sys; print('%d.%d.%d' % sys.version_info[:3])").stdout.strip()
