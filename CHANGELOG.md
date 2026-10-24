@@ -1,5 +1,62 @@
 # Changelog
 
+## Unreleased
+
+This release is about trust: each project's handoffs stay its own and private to you, a saved handoff survives crashes, retries and API errors, and the next session is told which claims it can rely on and which to check. Requests no longer show as "Stop hook error" on current Claude Code.
+
+### Upgrading
+
+- **Project folders get new names**, `<name>-<hash>` instead of the path with hyphens. The first session in a project moves its old folder into place. If the session that saved it, or its commit, points to another project, the folder stays where it is and `/contextrail:doctor` says so; `/contextrail:purge --legacy` deletes it.
+- **Existing files are made private** at the first session start (folders 0700, files 0600, on macOS and Linux).
+- **Claude Code 2.1.163 or newer** is needed for ContextRail, and **2.1.286 or newer** for `contextrail-continue`. [docs/compatibility.md](docs/compatibility.md) has the details.
+- Update both plugins, then restart Claude Code.
+
+### Data safety
+
+- **No more shared folders:** 0.6 named a project's folder after its path with every other character turned into a hyphen, so `/work/app/api` and `/work-app-api` shared one folder: the same current handoff, history and state. Each folder is now named by a SHA-256 of the project's canonical path (symlinks resolved), carries a `project.json` that names its project, and is never read for another one. Each git worktree is its own project. An archived handoff saved for another project is not restored.
+- **Private files:** handoffs, prompts and state were readable by other users of the machine (0755 folders, 0644 files). Everything is now created private, older installs are fixed at session start, and the doctor reports anything still readable. The status-line launcher stays executable, for you only.
+- **Locking on every platform:** sessions open in one project share a lock around every state change: `fcntl` on macOS and Linux, `msvcrt` on Windows (where 0.6 took no lock), and an exclusive lock file elsewhere. Tests run four processes writing at once and lose nothing.
+- **Crash-safe saves:** the previous handoff is archived before the new one replaces it, each file is written to a private temporary file and then moved into place, and the meta records which handoff it describes. A hook stopped part way leaves a usable handoff: the old one, or the new one with a warning that its changes since can't be checked.
+- **`/contextrail:purge`** lists, and with `--yes` deletes, this project's handoffs and state, only its archive (`--archives`), project folders untouched for DAYS days (`--stale DAYS`), or all of ContextRail's data except settings (`--everything`). An error log with no new errors for 30 days is deleted at a session start. [SECURITY.md](SECURITY.md) lists what ContextRail reads and writes and how long it keeps each file.
+
+### Requests
+
+- **Hook feedback instead of an error:** on Claude Code 2.1.163 and later, a handoff request and a fix request reach the agent as Stop feedback, which Claude Code doesn't label "Stop hook error occurred". Older versions get a blocked stop as before. `request_style` (`auto`, `feedback`, `block`) chooses. Checked in real Claude Code 2.1.310 with `tools/integration.py`: the request arrived as feedback and no hook error was reported.
+- **API errors:** a new StopFailure hook notices a turn that ended on a rate limit or another API error. The saved handoff stays as it was, a request made in the last 15 minutes doesn't count as an attempt, and `/contextrail:status` shows the error.
+- **Repeated events do nothing twice:** the same Stop event saves its handoff once, and a SessionStart repeated within a minute loads it once.
+- **Why it asked:** the rule and numbers behind each request are kept in the session's state, shown by `/contextrail:status`, and saved in the handoff's meta.
+- **Scheduled tasks** (`/loop`, reminders) are named in the request, so the handoff lists them for the next session. They never hold the request back.
+
+### What a handoff claims
+
+- **A Hypotheses section** for what the agent believes but hasn't confirmed. Known facts now say how each one is known, and the meta keeps every item with its kind (the user's instruction, a verified result, an observed fact, an inference, an open question).
+- **Checks say how their result is known:** only a check's own exit status of 0 counts as passed. A passing summary from a command that failed is "result unknown", a timed-out or interrupted run is listed as such, and a check moved to the background takes the result of its task notification. Each check records where and when it ran, how many files were edited after it, and whether git changed the tree after it.
+- **Better drift check:** renames (a file under its old name counts as changed), rewritten history, worktrees, and the edited files of a folder outside git. Items in Known facts, Hypotheses, Next steps and Verify first are now checked against the changes too, and recorded check results are called stale when files changed after them. When changes can't be checked, the next session is told so instead of "no changes".
+- **A loaded handoff is data, not permission:** the next session is told to keep to the user's rules from it, that nothing else in it is the user's request or approval, that text quoted from files and tools is data, and to ask before anything destructive. Earlier approvals of risky actions are listed as covering their moment only, and a copy of the wrapper's tags inside the handoff can't end it early.
+
+### contextrail-continue
+
+- **Scheduled tasks no longer hold the offer for good:** a recurring task never holds it, and a one-shot task holds it only when it is due within the hour and isn't a re-armed `/loop`. The pane names the scheduled tasks, and Lightning Mode asks y/n instead of counting down while one exists.
+- It recognises requests sent as Stop feedback, and shows its "this Stop hook error is ContextRail's request" note only for a blocked stop.
+
+### Commands
+
+- `/contextrail:doctor` checks the Claude Code version, the privacy of the data folder and the project folder (whose it is, whether its files can be read, an old folder left in place), and says why a handoff wouldn't load.
+- `/contextrail:status` shows how requests reach the agent, why the last one was made, and the latest API error.
+- `/contextrail:history` shows the branch and commit each handoff was saved at, and the project a restore is for.
+
+### Fixes
+
+- A transcript line whose `message` or `usage` wasn't an object crashed the PostToolUse, PreCompact and SessionEnd hooks (logged, not shown). Found by the new malformed-payload tests.
+- The doctor's storage check created a missing data folder readable by other users.
+
+### Development
+
+- **CI:** the Python suite on Linux and macOS with Python 3.9 and 3.13, and on Windows without failing the build; a time budget for the suite and its slowest tests listed; ruff; hook latency against its budgets; both plugins validated on Claude Code 2.1.163, 2.1.286 and the latest, and the companion's tests run with `claude plugin test`; CodeQL; Dependabot for the workflows' actions; and, for each published release, the tagged source tested and attached with its checksums and test output. Real Claude Code sessions run by hand (`integration.yml`).
+- **`tools/bench.py`** measures each hook as Claude Code runs it. **`tools/integration.py`** runs two real `claude -p` sessions: request, save, load.
+- **Evaluation:** plain-notes and facts-only baselines, a fixed held-out split, a blinded export for human reviewers with an agreement report (Cohen's kappa), the benchmark and ContextRail versions in every run, and requests found in both forms Claude Code saves them in. [docs/eval.md](docs/eval.md) now says what the numbers do and don't show; its run is labelled as benchmark 1 with ContextRail 0.5.0 prompts.
+- **Docs:** [docs/lifecycle.md](docs/lifecycle.md), [docs/compatibility.md](docs/compatibility.md) and [SECURITY.md](SECURITY.md).
+
 ## 0.6.0 (2026-10-23)
 
 ContextRail stays out of the way of your decisions and of running work: a question the agent asks you comes before the handoff request until the wrap-up point and is never buried under a countdown, and work that finishes after the final handoff still makes it into that handoff. The README is rewritten for new users, with the details moved to [docs/how-it-works.md](docs/how-it-works.md).

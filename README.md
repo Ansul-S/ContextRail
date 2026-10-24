@@ -45,7 +45,7 @@ Both modes save the same handoff, and both wait while background tasks run or th
 
 ## Install
 
-You need Claude Code 2.x, Python 3.9 or newer as `python3` on your `PATH`, and git (optional, used for the facts and the "what changed since" check).
+You need Claude Code 2.1.163 or newer (2.1.286 or newer for the optional `contextrail-continue`), Python 3.9 or newer as `python3` on your `PATH`, and git (optional, used for the facts and the "what changed since" check). macOS and Linux are supported; Windows isn't yet. [docs/compatibility.md](docs/compatibility.md) lists what is tested where.
 
 In Claude Code:
 
@@ -91,7 +91,8 @@ Commands:
 | `/contextrail:handoff` | Write a handoff now, at any size. Useful before a break |
 | `/contextrail:lightning 200k` | Turn Lightning Mode on at that size; `off` turns it off, no argument shows it |
 | `/contextrail:history` | List saved handoffs; `--restore N` makes an older one current again |
-| `/contextrail:doctor` | Check the setup: Python, hooks, storage, settings, and whether the handoff would load |
+| `/contextrail:doctor` | Check the setup: Python, hooks, Claude Code version, storage and its privacy, the project folder, settings, and whether the handoff would load |
+| `/contextrail:purge` | List this project's saved handoffs and state; `--yes` deletes them. `--archives`, `--stale DAYS` and `--everything` reach further |
 
 ## Decisions, questions and handoffs
 
@@ -101,7 +102,8 @@ ContextRail never answers or hides anything in Claude Code's own interface. Clau
 - **The y/n question and the Lightning countdown wait too.** They never appear while the agent waits for your answer or while background tasks run.
 - **Background work is never stopped.** Below the wrap-up point, ContextRail waits for running tasks before it asks, because their results belong in the handoff. If the final handoff had to be written while tasks were still running, ContextRail asks for it again once they finish, so the next session starts with their results. Only then is a new session offered.
 - **The y/n pane** takes the keyboard when the prompt box is empty. If you were typing, press ctrl+x tab to reach it. In a terminal narrower than 144 columns, the same question comes as a dialog.
-- **"Stop hook error occurred"** is how Claude Code labels ContextRail's request to the agent. Nothing failed. Press ctrl+o to read the request, or run `/contextrail:status`.
+- **The request is hook feedback, not an error.** From Claude Code 2.1.163 on, ContextRail's request reaches the agent as Stop hook feedback. Older versions, or `request_style` set to `block`, show it as "Stop hook error occurred", though nothing failed; ctrl+o shows the request.
+- **A loaded handoff is a record, not orders.** The next session is told to keep to your rules from it, to treat everything else in it, text quoted from files and tools included, as claims to check, and to ask again before acting on an approval it records. [docs/lifecycle.md](docs/lifecycle.md) describes every step a session goes through, and what happens when one fails or repeats.
 
 ## Settings
 
@@ -126,7 +128,7 @@ Settings go in `~/.contextrail/config.json`. Create the file if it doesn't exist
 
 The fallbacks are cautious starting points for people who set nothing; no setting guarantees that a model keeps working well. A session never starts empty (Claude Code's own instructions and tools often take 30-50k tokens), which is why the token points count from where the session started. `/contextrail:status` shows the points you get and what set them.
 
-A project can have its own `~/.contextrail/projects/<project>/config.json`, and any setting can be set for one run with an environment variable, for example `CONTEXTRAIL_SOFT_TOKENS=120000`. `CONTEXTRAIL_DISABLE=1` turns ContextRail off. All settings, and how the points are worked out, are in [docs/how-it-works.md](docs/how-it-works.md).
+A project can have its own `config.json` in its folder under `~/.contextrail/projects/` (`/contextrail:status` shows which), and any setting can be set for one run with an environment variable, for example `CONTEXTRAIL_SOFT_TOKENS=120000`. `CONTEXTRAIL_DISABLE=1` turns ContextRail off. All settings, and how the points are worked out, are in [docs/how-it-works.md](docs/how-it-works.md).
 
 ## Running the tests
 
@@ -144,13 +146,14 @@ claude plugin validate .
 claude plugin validate mods/contextrail-continue
 ```
 
-[CONTRIBUTING.md](CONTRIBUTING.md) explains how to try a change in a real session.
+CI runs these on Linux and macOS with Python 3.9 and 3.13, checks both plugins with the oldest supported and the latest Claude Code, lints, and measures hook latency (`python3 tools/bench.py`). [CONTRIBUTING.md](CONTRIBUTING.md) explains how to try a change in a real session.
 
 ## Troubleshooting
 
 | What you see | What to do |
 | --- | --- |
-| "Stop hook error occurred" | That is ContextRail's handoff request. Nothing failed; ctrl+o shows it. |
+| "Stop hook error occurred" | That is ContextRail's handoff request on Claude Code before 2.1.163, or with `request_style` `block`. Nothing failed; ctrl+o shows it. Update Claude Code to see it as hook feedback. |
+| A rate limit or API error during the handoff | Nothing is lost: the previous handoff stays current, and the request is made again at the next stop. `/contextrail:status` shows the error. |
 | No handoff request, though the session is long | Run `/contextrail:status`. If it says the window size is assumed, run `/contextrail:doctor --setup-statusline` or set `window_tokens`. The request also waits while background tasks run or the agent waits for your answer. |
 | The handoff came earlier than your setting | On a small or assumed window, `soft_pct` caps it. `/contextrail:status` says which rule decided. |
 | No y/n question, or no Lightning countdown | Check that `contextrail-continue` is installed and enabled, and see the previous rows: it waits for running tasks and for your answer. |
@@ -159,12 +162,17 @@ claude plugin validate mods/contextrail-continue
 
 ## Where your data lives
 
-Everything stays on your machine, under `~/.contextrail/` (or `CONTEXTRAIL_HOME`, which must be an absolute path). Nothing is written to your repository, and ContextRail makes no network requests and no extra model calls. Each project has its own folder with the current `HANDOFF.md`, its resume prompt, older handoffs in `history/`, and the session state.
+Everything stays on your machine, under `~/.contextrail/` (or `CONTEXTRAIL_HOME`, which must be an absolute path). Nothing is written to your repository, and ContextRail makes no network requests and no extra model calls. Each project has its own folder, `projects/<name>-<hash>/`, named by a hash of the project's path so two projects never share one, with the current `HANDOFF.md`, its resume prompt, older handoffs in `history/`, and the session state. On macOS and Linux only you can read it. `/contextrail:purge` deletes it. [SECURITY.md](SECURITY.md) lists what ContextRail reads and writes, how long it keeps each file, and how to report a problem.
+
+Uninstalling (`claude plugin uninstall contextrail@contextrail`) leaves that folder in place: run `/contextrail:purge --everything --yes` first if you want it gone. If you turned on the status line, also remove its `statusLine` entry from `~/.claude/settings.json`.
 
 ## Learn more
 
 - [docs/how-it-works.md](docs/how-it-works.md): triggers, settings, the status line, Lightning Mode and the companion plugin in detail, and an FAQ.
-- [docs/eval.md](docs/eval.md): how handoffs were measured on real sessions.
+- [docs/lifecycle.md](docs/lifecycle.md): the states of a session, failures, retries and repeated events.
+- [docs/compatibility.md](docs/compatibility.md): Claude Code versions, platforms, and what needs the companion plugin.
+- [docs/eval.md](docs/eval.md): how handoffs were measured on real sessions, what that does and doesn't show, and how to rerun it.
+- [SECURITY.md](SECURITY.md): data, privacy, the threat model and reporting.
 - [CHANGELOG.md](CHANGELOG.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License

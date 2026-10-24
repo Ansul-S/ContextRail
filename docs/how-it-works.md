@@ -11,6 +11,9 @@ ContextRail is a set of Claude Code hooks, each a short Python process:
 - **PreCompact**: saves the recorded facts before compaction, carrying over the last narrative.
 - **SessionStart**: loads the handoff into a new session, with what changed in the repository since.
 - **SessionEnd**: saves a checkpoint of the facts when a session that edited files ends without a handoff.
+- **StopFailure** (a turn that ended on an API error, such as a rate limit): keeps the saved handoff as it is, and doesn't count a request that turn was answering, so the next stop asks again.
+
+[lifecycle.md](lifecycle.md) puts these together: the states a session goes through, and what happens when an event fails or arrives twice.
 
 The agent writes its handoff as a `<contextrail-handoff>` block in its reply. ContextRail checks it, adds the facts it recorded itself, and saves it.
 
@@ -33,7 +36,7 @@ wrap-up point = min(start + hard_tokens, window × hard_pct %), and never before
 - **Your token settings decide** whenever the window is big enough. The shares are a guard for small windows: they can only bring a point forward, never push it back. To loosen a guard, raise `soft_pct` or `hard_pct` (up to 100).
 - **Each setting can be set on its own.** If you raise only `soft_tokens` past the fallback `hard_tokens`, the wrap-up point follows it, 30,000 later.
 - **Settings are checked.** `soft_tokens` and `hard_tokens` must be above 0, and the shares 1 to 100; an invalid value is ignored. If you set `hard_tokens` yourself and it is not above `soft_tokens`, ContextRail uses `soft_tokens` + 30,000 until you fix it. `/contextrail:doctor` and `/contextrail:status` say so.
-- **Every request says why.** Its note gives both points, what set each one, the window size and where it came from, and any tasks still running. Claude Code keeps that note behind ctrl+o, because it labels the request "Stop hook error occurred"; `/contextrail:status` shows the same.
+- **Every request says why.** Its note gives both points, what set each one, the window size and where it came from, and any tasks still running; `/contextrail:status` shows the same, and the saved handoff's meta keeps it. From Claude Code 2.1.163 on, the request reaches the agent as Stop hook feedback. With a blocked stop (older versions, or `request_style` set to `block`), Claude Code labels the request "Stop hook error occurred" and keeps the note behind ctrl+o.
 
 Examples. These are starting points to try, not guarantees: no setting keeps a model from making mistakes, and where long sessions start to slip depends on the model and the task.
 
@@ -114,7 +117,7 @@ y: Start a new session   n: Keep this session
 - **Sending a prompt** withdraws the question; you stay in the current session.
 - **It waits for running work and for your answers.** While background or scheduled tasks (such as `/loop`) are pending, it holds the question until they finish and their results are shown. At a stop where the agent waits for your answer, it holds it too.
 - **Narrow terminals:** Claude Code only shows a pane it didn't ask for in a terminal at least 144 columns wide. In a narrower one, the plugin asks the same question in Claude Code's question dialog.
-- **It explains the label:** when ContextRail asks for a handoff, the plugin notes that the "Stop hook error" above is ContextRail's request.
+- **It explains the label:** when ContextRail's request comes as a blocked stop, the plugin notes that the "Stop hook error" above is ContextRail's request.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -135,7 +138,7 @@ The limit can be written 200k, 0.2M, 200000 or 200,000, and must be at least 10k
 
 ## All settings
 
-Settings are applied in this order, later ones winning: built-in defaults, `~/.contextrail/config.json`, `~/.contextrail/projects/<project>/config.json`, then environment variables (`CONTEXTRAIL_` plus the key in upper case).
+Settings are applied in this order, later ones winning: built-in defaults, `~/.contextrail/config.json`, the project folder's `config.json` (`~/.contextrail/projects/<name>-<hash>/`, which `/contextrail:status` shows), then environment variables (`CONTEXTRAIL_` plus the key in upper case).
 
 ```json
 {
@@ -156,6 +159,7 @@ Settings are applied in this order, later ones winning: built-in defaults, `~/.c
   "history_keep": 20,
   "unattended": false,
   "lightning_tokens": 0,
+  "request_style": "auto",
   "enabled": true
 }
 ```
@@ -168,12 +172,14 @@ Settings are applied in this order, later ones winning: built-in defaults, `~/.c
 - `copy_resume_prompt` puts the resume prompt on your clipboard when a handoff is saved.
 - `unattended` lets ContextRail run in sessions nobody is watching, such as `claude -p` and the Agent SDK. Off by default, so a scripted run neither asks for a handoff nor replaces yours.
 - `lightning_tokens` works only in `~/.contextrail/config.json` and `CONTEXTRAIL_LIGHTNING_TOKENS`, so both plugins read the same value.
+- `request_style` is how a request reaches the agent: `auto` sends Stop feedback on Claude Code 2.1.163 and later (read from the session's transcript) and a blocked stop before; `feedback` and `block` choose one for every version.
 - `CONTEXTRAIL_DISABLE=1` turns ContextRail off everywhere; `{"enabled": false}` in a project's `config.json` turns it off there. `CONTEXTRAIL_HOME` moves the data folder; use an absolute path.
 
 ## Where files live
 
 ```
-~/.contextrail/projects/<project-path-slug>/
+~/.contextrail/projects/<name>-<hash>/
+  project.json        which project the folder belongs to: its canonical path
   HANDOFF.md          current handoff (overwritten each time)
   RESUME_PROMPT.txt   the resume prompt
   history/            previous handoffs, each with its meta (never loaded automatically)
@@ -182,7 +188,7 @@ Settings are applied in this order, later ones winning: built-in defaults, `~/.c
   config.json         optional per-project settings
 ```
 
-`~/.contextrail/` also holds `config.json`, `error.log` (errors in the hooks), `heartbeat.json` (when each hook last ran) and `plugin-root` (where the plugin is installed). With the status-line wrapper it also holds `bin/statusline` and `sessions/`, the window size of each session, kept for 7 days. A project is the git repository root, or the folder itself outside a repository; sessions started in subfolders share it.
+`~/.contextrail/` also holds `config.json`, `error.log` (errors in the hooks), `heartbeat.json` (when each hook last ran) and `plugin-root` (where the plugin is installed). With the status-line wrapper it also holds `bin/statusline` and `sessions/`, the window size of each session, kept for 7 days. A project is the git repository root, or the folder itself outside a repository; sessions started in subfolders share it, and each git worktree is a project of its own. The folder is named after the project's last path component and the first 20 hex digits of a SHA-256 of its canonical path (absolute, symlinks resolved), so two projects never share one. ContextRail 0.6 and earlier named the folder after the path with every other character replaced by a hyphen, so `/work/app/api` and `/work-app-api` shared one. Such a folder is moved to the new name the first time a session opens the project, unless the session that saved it, or its commit, points to another project; then it stays, and `/contextrail:doctor` says so. On macOS and Linux everything is readable only by you (folders 0700, files 0600). [../SECURITY.md](../SECURITY.md) lists what each file holds and how long it is kept.
 
 ## FAQ
 
@@ -196,16 +202,16 @@ No. Claude Code's question picker and permission prompts are Claude Code's own, 
 ContextRail asks at most three times per session, then tells you to run `/contextrail:handoff` when you are ready. An incomplete handoff, or one that leaves out what the session's facts show, gets one request for a fix. After that it is saved anyway, with a warning.
 
 **What does "what changed since" cover?**
-When a handoff is saved, ContextRail notes the commit and a fingerprint of each uncommitted file. When the next session loads it, ContextRail lists the new commits, which files changed since, and the Done and In progress items that name one of those files, and tells the agent to re-check them and run the Verify first commands.
+When a handoff is saved, ContextRail notes the branch, the commit, and a fingerprint of each uncommitted file (outside git, of each file the session edited). When the next session loads it, ContextRail lists the new commits, a branch switch, history rewritten since (a commit no longer an ancestor), files changed, created, deleted or renamed since, and the items that name one of those files (Done, In progress, Known facts, Hypotheses, Next steps and Verify first; a renamed file counts under its old name), and tells the agent to re-check them and run the Verify first commands. Check results recorded before such changes are called out as stale. When it can't tell, because git is missing, the commit is gone or the meta doesn't match the handoff, it says the changes couldn't be checked rather than reporting none. Unchanged files raise nothing.
 
 **How does it know whether a check passed?**
-It picks the test, lint or build command out of each shell command. If the command's exit status belongs to that check, it uses the exit status. If a pipe or a later command hides it, ContextRail reads the summary line the tool prints (unittest, pytest, jest, vitest, go, cargo, mypy, ruff and others). Without one, the check is listed as "ran", not "passed".
+It picks the test, lint or build command out of each shell command. If the command's exit status belongs to that check, it uses the exit status. If a pipe or a later command hides it, ContextRail reads the summary line the tool prints (unittest, pytest, jest, vitest, go, cargo, mypy, ruff and others). Without one, the check is listed as "ran", not "passed". Only a check's own exit status of 0 counts as verified: a passing summary from a command that failed is "result unknown", a timed-out or interrupted run is listed as such, and a check moved to the background takes the result of its task notification. Each recorded check also keeps where and when it ran, how many files were edited after it, and whether git changed the tree after it.
 
 **Hooks feel slow.**
-Each hook is one short Python process, usually under 0.1 s. Version-manager shims such as pyenv can add about 0.15 s per call; `/contextrail:doctor` measures it.
+Each hook is one short Python process. `python3 tools/bench.py` measures them as Claude Code runs them, with a 5 MB transcript; on the maintainer's Mac with macOS's Python 3.9 (24 October 2026) the p95 was 89-96 ms for the hooks that run on every turn or tool call (32 ms of it Python's own start-up), 176 ms to load a handoff and 266 ms to save one. The budgets CI holds them to are 150 ms and 500 ms. Version-manager shims such as pyenv can add about 0.15 s per call; `/contextrail:doctor` measures yours.
 
 **Windows?**
-It should work if `python3` is on your `PATH`; file locking and the clipboard use fallbacks. It is not tested in CI. The status-line launcher is a shell script, so it works on macOS and Linux only.
+Not supported yet. The hooks run `python3`, and nothing has been tried in a real Claude Code session on Windows. CI runs the test suite there without failing the build on it. The status-line launcher is a shell script, so it works on macOS and Linux only. [compatibility.md](compatibility.md) has the details.
 
 **Will it overwrite my notes?**
 The previous `HANDOFF.md` moves to `history/` each time a new one is saved; the last 20 are kept. `/contextrail:history` lists them, and `--restore N` brings one back.
@@ -214,12 +220,14 @@ The previous `HANDOFF.md` moves to `history/` each time a new one is saved; the 
 
 ```
 .claude-plugin/        plugin and marketplace manifests
-hooks/hooks.json       Stop, PostToolUse, PreCompact, SessionStart and SessionEnd hooks
-commands/              /contextrail:handoff, :status, :doctor, :history and :lightning
+hooks/hooks.json       Stop, StopFailure, PostToolUse, PreCompact, SessionStart and SessionEnd hooks
+commands/              /contextrail:handoff, :status, :doctor, :history, :lightning and :purge
 contextrail/cr.py      entry point for the hooks, the status line and the commands
-contextrail/*.py       usage, facts, handoff, storage, config, prompts, status, doctor, history, lightning, statusline
+contextrail/*.py       usage, facts, handoff, storage, config, prompts, status, doctor, history, lightning, purge, statusline
 mods/                  contextrail-continue, the optional mod
 tests/                 unittest suite with synthetic transcripts
 tools/eval/            handoff evaluation on real sessions (development only; uses Claude Code quota)
-docs/                  this page and eval.md
+tools/bench.py         hook latency against its budgets (no model calls)
+tools/integration.py   two real `claude -p` sessions: request, save, load (uses Claude Code quota)
+docs/                  this page, lifecycle.md, compatibility.md and eval.md
 ```
