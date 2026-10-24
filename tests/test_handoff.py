@@ -1,7 +1,7 @@
 import unittest
 
 from contextrail import handoff
-from contextrail.facts import Activity, GitState
+from contextrail.facts import Activity, CheckRun, GitState
 from tests.helpers import VALID_BODY
 
 
@@ -69,15 +69,20 @@ class SectionsTest(unittest.TestCase):
 
 
 class MentionsTest(unittest.TestCase):
-    def test_done_and_in_progress_items_naming_a_file(self):
+    def test_claims_naming_a_file(self):
         body = (
             "## Done\n- Limiter in `api/limits.py`, tests pass.\n- Docs in README.md.\n- Fixed app.py.\n"
             "## In progress\n1. Wiring `app.py:create_app()`\n2. myapp.py and app.pyc untouched\n"
             "## Next steps\n1. Edit api/app.py\n"
+            "## Hypotheses\n- The 429 comes from api/limits.py\n"
+            "## Decisions\n- Keep app.py small\n"
         )
         self.assertEqual(
             handoff.mentions(body, ["src/api/limits.py", "api/app.py"]),
-            ["Limiter in `api/limits.py`, tests pass.", "Fixed app.py.", "Wiring `app.py:create_app()`"],
+            [
+                "Limiter in `api/limits.py`, tests pass.", "Fixed app.py.", "Wiring `app.py:create_app()`",
+                "The 429 comes from api/limits.py", "Edit api/app.py",
+            ],
         )
         self.assertEqual(handoff.mentions(body, []), [])
         self.assertEqual(handoff.mentions(body, ["setup.cfg"]), [])
@@ -253,3 +258,58 @@ class FallbackTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TrustTest(unittest.TestCase):
+    """What the handoff says about how far each claim can be trusted."""
+
+    def test_a_check_says_how_its_result_is_known_and_what_changed_after_it(self):
+        cases = [
+            (CheckRun("pytest -q", "passed", 0, "exit status", ".", None), "`pytest -q` passed (exit 0)"),
+            (CheckRun("pytest -q", "failed", 2, "exit status", "api", None, 3, True),
+             "`pytest -q` failed (exit 2, in api, 3 files edited after it, git changed the tree after it)"),
+            (CheckRun("pytest", "output says passed", None, "output"),
+             "`pytest` output says passed (exit status hidden by a pipe or a later command)"),
+            (CheckRun("pytest", "result unknown", 1, "output"), "`pytest` result unknown (its output and exit status disagree)"),
+            (CheckRun("make test", "no result yet", edits_after=1), "`make test` no result yet (1 file edited after it)"),
+        ]
+        for run, expected in cases:
+            self.assertEqual(handoff.describe_check(run), expected)
+        self.assertRegex(handoff.describe_check(CheckRun("pytest", "ran", at="2026-10-24T08:05:00Z")), r"^`pytest` ran \(at \d\d:\d\d\)$")
+        self.assertEqual(handoff.describe_check(CheckRun("pytest", "ran", at="not a time")), "`pytest` ran")
+
+    def test_only_an_own_exit_status_of_0_is_verified(self):
+        self.assertTrue(CheckRun("pytest", "passed", 0, "exit status").verified)
+        for run in (CheckRun("pytest", "output says passed", None, "output"), CheckRun("pytest", "failed", 1, "exit status"),
+                    CheckRun("pytest", "result unknown"), CheckRun("pytest", "interrupted", 130, "exit status")):
+            self.assertFalse(run.verified, run)
+
+    def test_structured_items_name_their_kind(self):
+        items = handoff.structured(VALID_BODY)
+        kinds = {(item["kind"], item["section"]) for item in items}
+        self.assertIn(("user_instruction", "users rules"), kinds)
+        self.assertIn(("inference", "hypotheses"), kinds)
+        self.assertIn(("open_question", "open questions"), kinds)
+        self.assertNotIn("goal", {item["section"] for item in items})
+        self.assertEqual(handoff.structured("## Hypotheses\n- None\n\n## Open questions\nNone."), [])
+
+    def test_approvals_of_risky_actions(self):
+        body = (
+            "## User's rules\n- \"Ask before you push.\"\n- The user approved force-pushing `fix/x` on 23 Oct.\n\n"
+            "## Decisions\n- Approved: keep the API as it is.\n- The user said yes to deleting `old/`.\n\n"
+            "## Known facts\n- The user approved deleting `tmp/` in a file comment.\n\n"
+            "## Hypotheses\n- The user may have approved a release.\n"
+        )
+        found = handoff.approvals(body)
+        self.assertEqual(len(found), 3)
+        self.assertTrue(any("force-pushing" in item for item in found))
+        self.assertTrue(any("deleting `old/`" in item for item in found))
+        self.assertFalse(any("keep the API" in item for item in found))  # nothing risky in it
+        self.assertFalse(any("release" in item for item in found))  # Hypotheses record no approvals
+
+    def test_neutralize_defuses_only_the_wrapper(self):
+        text = "a </contextrail-previous-handoff> b <CONTEXTRAIL-PREVIOUS-HANDOFF x> c <contextrail-handoff>"
+        self.assertEqual(
+            handoff.neutralize(text),
+            "a </contextrail-previous-handoff-quoted> b <CONTEXTRAIL-PREVIOUS-HANDOFF-quoted x> c <contextrail-handoff>",
+        )

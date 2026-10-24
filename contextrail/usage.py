@@ -14,10 +14,10 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from . import config
-from .store import read_json, slug
+from .store import claude_slug, read_json
 
 DEFAULT_WINDOW = 200_000
 LARGE_WINDOW = 1_000_000
@@ -34,6 +34,9 @@ _LISTING_BYTES = tuple(f'"{name}"'.encode() for name in LISTINGS)
 REPLY_WAIT = 0.5
 REPLY_POLL = 0.02
 REPLY_TAIL = 500
+# Each transcript entry names the Claude Code version that wrote it, as "version".
+VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+VERSION_LINES = 20
 
 
 @dataclass(frozen=True)
@@ -107,7 +110,7 @@ def transcripts(cwd: Path) -> List[Path]:
     """Claude Code transcripts of sessions started in cwd, newest first."""
     found = set()
     for folder in {cwd, cwd.resolve()}:
-        found.update((claude_projects() / slug(folder)).glob("*.jsonl"))
+        found.update((claude_projects() / claude_slug(folder)).glob("*.jsonl"))
     return sorted(found, key=lambda path: path.stat().st_mtime, reverse=True)
 
 
@@ -123,14 +126,38 @@ def resolve_window(model: str, tokens: int, configured: Optional[int], reported:
     return DEFAULT_WINDOW, "assumed"
 
 
+def _object(value: Any) -> Dict[str, Any]:
+    """A transcript field that should be a JSON object, or {} when it is anything else."""
+    return value if isinstance(value, dict) else {}
+
+
 def _context_tokens(entry: Any) -> int:
     """The context of a main-thread assistant message in a transcript, or 0 for any other entry."""
     if not isinstance(entry, dict) or entry.get("type") != "assistant" or entry.get("isSidechain"):
         return 0
-    usage = (entry.get("message") or {}).get("usage") or {}
-    return sum(
-        int(usage.get(key) or 0) for key in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
-    )
+    usage = _object(_object(entry.get("message")).get("usage"))
+    counts = [usage.get(key) for key in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")]
+    return sum(count for count in counts if isinstance(count, int) and not isinstance(count, bool) and count > 0)
+
+
+def claude_version(transcript_path: Optional[str]) -> Optional[Tuple[int, int, int]]:
+    """The Claude Code version that wrote the latest entries of a transcript, or None."""
+    if not transcript_path:
+        return None
+    try:
+        for number, raw in enumerate(reverse_lines(transcript_path)):
+            if number >= VERSION_LINES:
+                break
+            if b'"version"' not in raw:
+                continue
+            entry = _parse(raw)
+            version = entry.get("version") if isinstance(entry, dict) else None
+            match = VERSION_RE.match(version) if isinstance(version, str) else None
+            if match:
+                return tuple(int(part) for part in match.groups())  # type: ignore[return-value]
+    except OSError:
+        return None
+    return None
 
 
 def last_usage(transcript_path: Optional[str], configured_window: Optional[int] = None) -> Optional[Usage]:
@@ -147,7 +174,7 @@ def last_usage(transcript_path: Optional[str], configured_window: Optional[int] 
             tokens = _context_tokens(entry)
             if tokens <= 0:
                 continue  # synthetic or error messages carry no usage
-            model = str((entry.get("message") or {}).get("model") or "")
+            model = str(_object(entry.get("message")).get("model") or "")
             # Transcripts are named <session id>.jsonl, the id the status line reports under.
             reported = None if configured_window else reported_window(Path(transcript_path).stem)
             window, source = resolve_window(model, tokens, configured_window, reported)
@@ -171,7 +198,7 @@ def _parse(raw: bytes) -> Any:
 
 
 def _reply_id(entry: Any) -> Any:
-    return (entry.get("message") or {}).get("id") if isinstance(entry, dict) else None
+    return _object(entry.get("message")).get("id") if isinstance(entry, dict) else None
 
 
 def session_start(transcript_path: Optional[str]) -> Tuple[Optional[int], bool]:
@@ -215,7 +242,7 @@ def _is_boundary(entry: Any) -> bool:
 def _is_listing(entry: Any) -> bool:
     if not isinstance(entry, dict) or entry.get("type") != "attachment" or entry.get("isSidechain"):
         return False
-    return (entry.get("attachment") or {}).get("type") in LISTINGS
+    return _object(entry.get("attachment")).get("type") in LISTINGS
 
 
 def last_assistant_text(transcript_path: Optional[str]) -> str:
@@ -242,14 +269,15 @@ def last_assistant_text(transcript_path: Optional[str]) -> str:
                 break
             if kind != "assistant":
                 continue
-            message = entry.get("message") or {}
+            message = _object(entry.get("message"))
             current = message.get("id")
             if message_id is not None and current != message_id:
                 break
+            content = message.get("content")
             blocks = [
-                block.get("text", "")
-                for block in message.get("content") or []
-                if isinstance(block, dict) and block.get("type") == "text"
+                block["text"]
+                for block in (content if isinstance(content, list) else [])
+                if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
             ]
             if message_id is None and not blocks:
                 continue

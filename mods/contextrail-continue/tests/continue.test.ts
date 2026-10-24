@@ -44,7 +44,7 @@ function engine(on: On, env: Record<string, string> = {}) {
     asked: [] as unknown[],
   }
   const world = {
-    stopAnswer: {} as { block?: string },
+    stopAnswer: {} as { block?: string; additionalContext?: string[] },
     isPlaced: true,
     answer: undefined as string | undefined, // undefined: the dialog is dismissed
     config: undefined as string | undefined, // ContextRail's config.json; undefined: there is none
@@ -94,11 +94,25 @@ async function stop($: Engine, message: string) {
   return $.classic.Stop({ stop_hook_active: false, last_assistant_message: message })
 }
 
-async function requestThenSave($: Engine, world: { stopAnswer: { block?: string } }) {
+async function requestThenSave($: Engine, world: { stopAnswer: { block?: string; additionalContext?: string[] } }) {
   world.stopAnswer = { block: REQUEST }
   await stop($, 'Done with the refactor.')
   world.stopAnswer = {}
   await stop($, HANDOFF)
+}
+
+/** A one-shot task's cron expression for a time, in local time, as Claude Code writes one. */
+function cronAt(ms: number): string {
+  const at = new Date(ms)
+  return `${at.getMinutes()} ${at.getHours()} ${at.getDate()} ${at.getMonth() + 1} *`
+}
+
+/** ContextRail asks, as Stop feedback, then the agent's handoff ends a turn with this Stop payload. */
+async function feedbackThenSave($: Engine, world: { stopAnswer: { additionalContext?: string[] } }, extra: object = {}) {
+  world.stopAnswer = { additionalContext: [REQUEST] }
+  await stop($, 'Done with the refactor.')
+  world.stopAnswer = {}
+  await $.classic.Stop({ stop_hook_active: true, last_assistant_message: HANDOFF, ...extra })
 }
 
 test('asks in a pane once ContextRail asked and saved, and y clears and continues', async ($, on) => {
@@ -288,12 +302,12 @@ test('watchers and Claude Code\'s own chores hold nothing, so Lightning still co
 test('a prompt from the person, or the session ending, drops a held offer', async ($, on) => {
   const { clock, seen, world } = engine(on)
   on('session.end', (_, e) => ({ sessionId: e.sessionId }))
-  const crons = [{ id: 'c1', schedule: '*/5 * * * *', recurring: true, prompt: '/babysit-prs' }]
+  const running = [{ id: 'b1', type: 'shell', status: 'running', description: 'npm test' }]
   for (const carryOn of ['prompt', 'end'] as const) {
     world.stopAnswer = { block: REQUEST }
     await stop($, 'ok')
     world.stopAnswer = {}
-    await $.classic.Stop({ stop_hook_active: true, last_assistant_message: HANDOFF, session_crons: crons })
+    await $.classic.Stop({ stop_hook_active: true, last_assistant_message: HANDOFF, background_tasks: running })
     if (carryOn === 'prompt') {
       await $.prompt.submit({ text: 'how is it going?', origin: { kind: 'composer' }, wait: false })
     } else {
@@ -546,4 +560,122 @@ test('Lightning reads config.json from CONTEXTRAIL_HOME', async ($, on) => {
   await clock.settle()
   expect(seen.asked).toEqual([])
   expect(seen.toasts.at(-1)).toContain('Lightning Mode')
+})
+
+test('a request sent as Stop feedback is recognised, with no "Stop hook error" note', async ($, on) => {
+  const { clock, seen, world } = engine(on)
+  await feedbackThenSave($, world)
+  await clock.advance(500)
+  expect(seen.opened).toEqual(['contextrail-continue'])
+  expect(seen.toasts.some((text) => text.includes('Stop hook error'))).toBe(false)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'yes' })
+  await clock.settle()
+  expect(seen.commands).toEqual(['clear'])
+  expect(seen.prompts).toEqual([RESUME])
+  await ui.unmount()
+})
+
+test('a checkpoint request sent as feedback offers nothing, and a fix sent as feedback waits', async ($, on) => {
+  const { clock, seen, world } = engine(on)
+  world.stopAnswer = { additionalContext: [`${REQUEST} This handoff is a checkpoint: work goes on.`] }
+  await stop($, 'ok')
+  world.stopAnswer = { additionalContext: [FIX] }
+  await $.classic.Stop({ stop_hook_active: true, last_assistant_message: HANDOFF })
+  world.stopAnswer = {}
+  await $.classic.Stop({ stop_hook_active: true, last_assistant_message: HANDOFF })
+  await clock.advance(600_000)
+  expect(seen.opened).toEqual([])
+  expect(seen.asked).toEqual([])
+})
+
+test('another hook that keeps the turn going is not the end of the turn', async ($, on) => {
+  const { clock, seen, world } = engine(on)
+  world.stopAnswer = { block: REQUEST }
+  await stop($, 'ok')
+  world.stopAnswer = { additionalContext: ['Please run the test suite before finishing.'] }
+  await $.classic.Stop({ stop_hook_active: true, last_assistant_message: HANDOFF })
+  await clock.advance(500)
+  expect(seen.opened).toEqual([])
+})
+
+test('a recurring schedule does not hold the offer, and the pane names it', async ($, on) => {
+  const { clock, seen, world } = engine(on)
+  const crons = [{ id: 'c1', schedule: '*/5 * * * *', recurring: true, prompt: '/babysit-prs' }]
+  await feedbackThenSave($, world, { session_crons: crons })
+  await clock.advance(500)
+  expect(seen.opened).toEqual(['contextrail-continue'])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const note = await ui.find({ type: 'Text', text: /Scheduled in this session/ })
+  expect(note?.text).toContain('/babysit-prs (*/5 * * * *)')
+  expect(note?.text).toContain('A new session may not run it.')
+  await ui.unmount()
+})
+
+test('Lightning asks instead of counting down while a recurring task is scheduled', async ($, on) => {
+  const { clock, seen, world } = engine(on)
+  world.config = LIGHTNING
+  const crons = [{ id: 'c1', schedule: '0 9 * * 1-5', recurring: true, prompt: 'check the build' }]
+  await feedbackThenSave($, world, { session_crons: crons })
+  await clock.advance(30_000)
+  await clock.settle()
+  expect(seen.opened).toEqual(['contextrail-continue'])
+  expect(seen.commands).toEqual([])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Press y to start a new Claude Code session/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Lightning Mode: starting a new session/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a one-shot task due soon holds the offer until it has run', async ($, on) => {
+  const { clock, seen, world } = engine(on)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  const soon = [{ id: 'w1', schedule: cronAt(clock.now() + 10 * 60_000), recurring: false, prompt: 'check whether CI passed' }]
+  await feedbackThenSave($, world, { session_crons: soon })
+  await clock.advance(60_000)
+  expect(seen.opened).toEqual([])
+  expect(seen.toasts.at(-1)).toContain('a task is due to run soon')
+
+  // It fires, its turn shows the result, and nothing is scheduled any more.
+  await $.turn.start({ text: '', turnId: 't2' })
+  await $.classic.Stop({ stop_hook_active: false, last_assistant_message: 'CI passed.', session_crons: [] })
+  await clock.advance(500)
+  expect(seen.opened).toEqual(['contextrail-continue'])
+})
+
+test('a one-shot task due later than an hour does not hold the offer', async ($, on) => {
+  const { clock, seen, world } = engine(on)
+  const later = [{ id: 'w1', schedule: cronAt(clock.now() + 3 * 3_600_000), recurring: false, prompt: 'push the release branch' }]
+  await feedbackThenSave($, world, { session_crons: later })
+  await clock.advance(500)
+  expect(seen.opened).toEqual(['contextrail-continue'])
+})
+
+test('a self-paced loop holds the offer for one wakeup at most, then is treated as recurring', async ($, on) => {
+  const { clock, seen, world } = engine(on)
+  world.config = LIGHTNING
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  const wakeup = (id: string) => [{ id, schedule: cronAt(clock.now() + 5 * 60_000), recurring: false, prompt: '/loop check the deploy' }]
+  await feedbackThenSave($, world, { session_crons: wakeup('w1') })
+  await clock.advance(60_000)
+  expect(seen.opened).toEqual([])
+
+  // The wakeup fires, and its turn schedules the next one with the same prompt.
+  await $.turn.start({ text: '', turnId: 't2' })
+  await $.classic.Stop({ stop_hook_active: false, last_assistant_message: 'Deploy still running.', session_crons: wakeup('w2') })
+  await clock.advance(500)
+  expect(seen.opened).toEqual(['contextrail-continue'])
+  await clock.advance(30_000)
+  await clock.settle()
+  expect(seen.commands).toEqual([]) // asked, not counted down: the loop would stop in a new session
+})
+
+test('running work holds the offer even when the only schedule is recurring', async ($, on) => {
+  const { clock, seen, world } = engine(on)
+  const running = [{ id: 'b1', type: 'subagent', status: 'running', description: 'review the migration' }]
+  const crons = [{ id: 'c1', schedule: '*/10 * * * *', recurring: true, prompt: '/babysit-prs' }]
+  await feedbackThenSave($, world, { background_tasks: running, session_crons: crons })
+  await clock.advance(600_000)
+  expect(seen.opened).toEqual([])
+  expect(seen.commands).toEqual([])
 })

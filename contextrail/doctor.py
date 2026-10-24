@@ -17,11 +17,16 @@ from typing import Any, Callable, Dict, List, Tuple
 
 from . import __version__, config, facts, handlers, prompts, statusline, store
 from .config import tilde
-from .usage import REPORT_FRESH, claude_projects, last_usage, start_tokens, transcripts
+from .usage import REPORT_FRESH, claude_projects, claude_version, last_usage, start_tokens, transcripts
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 ISSUES_URL = "https://github.com/Ansul-S/ContextRail/issues"
 SLOW_START_MS = 150
+# The oldest Claude Code ContextRail supports: Stop feedback came in 2.1.163, and the Stop payload's
+# background_tasks and session_crons in 2.1.145. CI and docs/compatibility.md list what is tested.
+MIN_CLAUDE_CODE = (2, 1, 163)
+# Hooks that run only when something goes wrong, so never having run is normal.
+RARE_HOOKS = ("StopFailure",)
 DAY = 86_400
 WEEK = 7 * DAY
 TRANSCRIPTS_TO_TRY = 5
@@ -136,7 +141,7 @@ def check_storage() -> Result:
     home = config.home()
     probe = home / f".doctor-{os.getpid()}.tmp"
     try:
-        home.mkdir(parents=True, exist_ok=True)
+        store.make_dir(home)
         probe.write_text("ok", encoding="utf-8")
         probe.unlink()
     except OSError as error:
@@ -181,7 +186,7 @@ def check_heartbeats() -> Result:
         stamp = beats.get(event)
         if isinstance(stamp, (int, float)):
             seen.append(f"{event} {handlers.describe_age(now - stamp)}")
-        else:
+        elif event not in RARE_HOOKS:
             never.append(event)
     detail = "last ran: " + ", ".join(seen + [f"{event} never" for event in never])
     started = beats.get("SessionStart")
@@ -262,8 +267,8 @@ def check_statusline() -> Result:
 
 
 def check_delivery(root: Path, cfg: Dict[str, Any]) -> Result:
-    """Run the SessionStart handler (it changes nothing) and check what it would load."""
-    project = store.Project(root)
+    """Work out what the SessionStart hook would load (this changes nothing) and check it."""
+    project = store.open_project(root)
     if not project.handoff.exists():
         return Result("ok", "Handoff", "none saved yet for this project")
     if not cfg["enabled"]:
@@ -271,17 +276,12 @@ def check_delivery(root: Path, cfg: Dict[str, Any]) -> Result:
     sources = [source for source in cfg["inject_on"] if source in config.SESSION_SOURCES]
     if not sources:
         return Result("warn", "Handoff", "saved, but inject_on names no session start, so it never loads")
-    output = handlers.on_session_start({"cwd": str(root), "source": sources[0], "session_id": "contextrail-doctor"})
+    output, why = handlers.load_context(project, root, cfg)
     if output is None:
-        seconds = handlers.age_seconds(str(store.read_json(project.meta).get("saved_at") or ""))
-        if seconds is not None and seconds > cfg["max_age_days"] * DAY:
-            return Result(
-                "warn",
-                "Handoff",
-                f"saved {handlers.describe_age(seconds)}, older than max_age_days ({cfg['max_age_days']}), "
-                "so it won't load",
-            )
-        return Result("fail", "Handoff", "saved, but the SessionStart hook returns nothing to load")
+        if "older than max_age_days" in why:
+            seconds = handlers.age_seconds(str(store.read_json(project.meta).get("saved_at") or ""))
+            return Result("warn", "Handoff", f"saved {handlers.describe_age(seconds)}, {why}, so it won't load")
+        return Result("fail", "Handoff", f"saved, but it won't load: {why}")
     context = (output.get("hookSpecificOutput") or {}).get("additionalContext")
     if not isinstance(context, str) or not context:
         return Result("fail", "Handoff", "the SessionStart hook returns no additionalContext, so the model won't see it")
@@ -289,10 +289,76 @@ def check_delivery(root: Path, cfg: Dict[str, Any]) -> Result:
         ", shortened to fit Claude Code's 10,000-character limit for hook context. Lower max_chars to load it whole"
         if prompts.SHORTENED in context else ""
     )
+    _, _, problems = store.read_handoff(project)
+    if problems:
+        return Result("warn", "Handoff", f"loads, but {problems[0]}, so changes since it can't be checked{shortened}")
     return Result(
         "ok", "Handoff",
         f"loads on {', '.join(sources)}: {len(context):,} characters (≈{len(context) // 4:,} tokens){shortened}",
     )
+
+
+def check_project(root: Path) -> Result:
+    """The project's folder: that it belongs to this project, that its files can be read, and
+    whether a folder from ContextRail 0.6 or earlier is still waiting to be moved."""
+    project = store.open_project(root)
+    owned, problem = store.belongs(project)
+    if not owned:
+        return Result("fail", "Project", f"{problem}. Move or delete that folder, then start a session again")
+    unreadable = []
+    for path in (project.meta, project.state, project.identity):
+        if path.exists():
+            try:
+                json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as error:
+                unreadable.append(f"{tilde(path)} ({error})")
+    if unreadable:
+        return Result("fail", "Project", "can't read " + "; ".join(unreadable) + ". ContextRail starts it afresh at its next write")
+    waiting = store.unclaimed_legacy(project)
+    if waiting:
+        why = store.read_json(project.identity).get("legacy_reason")
+        reason = f" because {why}" if why else ""
+        return Result(
+            "warn", "Project",
+            f"{tilde(waiting[0])}, from ContextRail 0.6 or earlier, was not moved to {tilde(project.dir)}{reason}. "
+            "If it holds this project's handoffs, move its files there; /contextrail:purge --legacy deletes it",
+        )
+    identity = store.read_json(project.identity)
+    moved = f", moved from {identity['migrated_from']}" if identity.get("migrated_from") else ""
+    return Result("ok", "Project", f"{tilde(project.dir)}{moved}")
+
+
+def check_privacy() -> Result:
+    """ContextRail's data holds handoffs and prompts: on POSIX only the user should read it."""
+    if os.name == "nt":
+        return Result("ok", "Privacy", "Windows: the data folder is as private as your user profile")
+    exposed = store.exposed()
+    if exposed:
+        return Result(
+            "warn", "Privacy",
+            f"{len(exposed)} folder(s) and file(s) under {tilde(config.home())} can be read by other users, "
+            f"such as {tilde(Path(exposed[0]))}. ContextRail makes them private at the next session start, "
+            f"or run: chmod -R go-rwx {shlex.quote(str(config.home()))}",
+        )
+    return Result("ok", "Privacy", f"{tilde(config.home())} is readable only by you")
+
+
+def check_claude_code(cwd: Path) -> Result:
+    """The Claude Code version, read from the latest transcript: it decides how a request is shown."""
+    found = transcripts(cwd)[:1] or _newest_transcripts()[:1]
+    version = claude_version(str(found[0])) if found else None
+    if version is None:
+        return Result("ok", "Claude Code", "version unknown until a session has run here")
+    shown = ".".join(map(str, version))
+    if version < MIN_CLAUDE_CODE:
+        return Result(
+            "warn", "Claude Code",
+            f"{shown} is older than {'.'.join(map(str, MIN_CLAUDE_CODE))}, the oldest version ContextRail supports. "
+            "Requests are shown as \"Stop hook error\" there, and background tasks aren't waited for. Update Claude Code",
+        )
+    style = config.load()["request_style"]
+    how = "as hook feedback" if style == "feedback" or (style == "auto" and version >= handlers.FEEDBACK_SINCE) else "as a blocked stop"
+    return Result("ok", "Claude Code", f"{shown}; handoff requests reach the agent {how}")
 
 
 def read_errors() -> List[Tuple[float, str, str]]:
@@ -345,12 +411,15 @@ def _guarded(name: str, check: Callable[..., Result], *args: Any) -> Result:
 def run(cwd: Path) -> Tuple[Path, List[Result]]:
     """The project root for cwd, and the result of every check."""
     root = facts.project_root(str(cwd))
-    project = store.Project(root)
+    project = store.open_project(root)
     cfg = config.load(project.dir)
     return root, [
         _guarded("Python", check_python),
         _guarded("Plugin", check_plugin),
+        _guarded("Claude Code", check_claude_code, cwd),
         _guarded("Storage", check_storage),
+        _guarded("Privacy", check_privacy),
+        _guarded("Project", check_project, root),
         _guarded("Settings", check_settings, project, cfg),
         _guarded("Hooks", check_heartbeats),
         _guarded("Transcript", check_transcript, cwd, cfg),

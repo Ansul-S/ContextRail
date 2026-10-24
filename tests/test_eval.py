@@ -1,3 +1,4 @@
+import csv
 import io
 import json
 import os
@@ -55,6 +56,8 @@ class FakeClaude:
             return "9.9.9 (Claude Code)\n"
         if self.fail:
             return result("API Error: overloaded", is_error=True)
+        if "--resume" in argv and stdin == steps.NOTES_PROMPT:
+            return result("Notes: plain notes about the limiter.")
         if "--resume" in argv:
             cap = int(re.search(r"Stay under ([\d,]+)", stdin).group(1).replace(",", ""))
             return result(self.handoff_reply or f"<contextrail-handoff>\n{VALID_BODY}\n\nvariant {cap}\n</contextrail-handoff>")
@@ -78,7 +81,7 @@ class FakeClaude:
 class EvalTest(TempHome):
     def setUp(self):
         super().setUp()
-        folder = self.claude / "projects" / store.slug(self.repo)
+        folder = self.claude / "projects" / store.claude_slug(self.repo)
         folder.mkdir(parents=True)
         request = cases.FEEDBACK + prompts.request(USAGE_LINE, 12_000, refresh=False)
         self.a_path = folder / f"{A}.jsonl"
@@ -118,7 +121,8 @@ class EvalTest(TempHome):
     def main(self, *args):
         out = io.StringIO()
         with mock.patch("sys.stdout", out), mock.patch("sys.stderr", out):
-            code = cli.main([*args, "--project", str(self.repo)] if args[0] != "report" else list(args), self.harness)
+            takes_project = args[0] in ("cases", "run")
+            code = cli.main([*args, "--project", str(self.repo)] if takes_project else list(args), self.harness)
         return code, out.getvalue()
 
     def case(self):
@@ -134,6 +138,15 @@ class EvalTest(TempHome):
         self.assertEqual((case.tokens, case.messages, case.cwd), (50_000, 1, str(self.repo)))
         self.assertEqual(case.saved_body, VALID_BODY)
         self.assertTrue(cases.facts_part(case.loaded).startswith("# Handoff: repo"))
+
+    def test_finds_a_request_sent_as_stop_feedback(self):
+        entries = [json.loads(raw) for raw in self.a_path.read_text().splitlines()]
+        request = prompts.request(USAGE_LINE, 12_000, refresh=False)
+        entries[2] = {"type": "attachment", "uuid": "r-1", "timestamp": "2026-10-20T09:55:01.000Z", "attachment": {
+            "type": "hook_additional_context", "hookEvent": "Stop", "hookName": "Stop", "content": [request]}}
+        write_transcript(self.a_path, entries)
+        case = self.case()
+        self.assertEqual((case.asked_by, case.saved_cap, case.usage_line), ("hook", 12_000, USAGE_LINE))
 
     def test_run_makes_each_call_once_then_reports(self):
         code, out = self.main("run", "--caps", "6000,8000")
@@ -161,7 +174,7 @@ class EvalTest(TempHome):
         self.assertEqual(env["CONTEXTRAIL_COPY_RESUME_PROMPT"], "0")
         self.assertEqual(env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"], "1")
         self.assertIn("Stay under 8,000 characters", calls[1][1])
-        for argv, stdin, cwd, _ in calls[2:]:
+        for argv, _stdin, cwd, _ in calls[2:]:
             self.assertEqual(argv[argv.index("--tools") + 1], "")
             self.assertEqual(argv[argv.index("--model") + 1], "opus")
             self.assertEqual(cwd, self.harness.work)
@@ -194,6 +207,94 @@ class EvalTest(TempHome):
         self.assertIn("| Cap 6,000 vs Cap 8,000 | 2 – 0 | 0 |", out)
         self.assertIn("| 1 | 50,000 | 1 | 2 | 100% | 50% | 25% |", out)
         self.assertNotIn("rate limiting", out.lower())  # numbers only
+
+    def test_baselines_are_judged_against_the_saved_handoff_with_their_own_material(self):
+        code, out = self.main("run", "--caps", "6000", "--baselines", "notes,facts")
+        self.assertEqual(code, 0, out)
+        folder = self.harness.root / "cases" / KEY
+        self.assertTrue((folder / "gen-notes.json").exists())
+        names = {path.name for path in folder.glob("judge-*.json")}
+        self.assertEqual(names, {f"judge-{x}-{y}.json" for x, y in [
+            ("saved", "6000"), ("6000", "saved"), ("saved", "notes"), ("notes", "saved"), ("saved", "facts"), ("facts", "saved")]})
+        calls = self.fake.model_calls()
+        self.assertEqual(len(calls), 9)  # 1 regeneration, the notes, the needs, 6 judgings
+        notes_call = next(call for call in calls if call[1] == steps.NOTES_PROMPT)
+        self.assertIn("--fork-session", notes_call[0])
+        judgings = [call[1] for call in calls if "<handoff-1>" in call[1]]
+        with_baseline = [stdin for stdin in judgings if "plain notes" in stdin or "<facts>" not in stdin]
+        self.assertEqual(len(with_baseline), 4)
+        for stdin in with_baseline:
+            self.assertNotIn("<facts>", stdin)  # no shared facts: each document carries what it gets
+            self.assertIn("everything the next session would get", stdin)
+        saved_side = next(stdin for stdin in with_baseline if "plain notes" in stdin)
+        self.assertIn("# Handoff: repo", saved_side)  # the saved handoff comes with its recorded facts
+        self.assertEqual(json.loads((folder / "judge-saved-notes.json").read_text())["facts"], "with each")
+        self.assertEqual(json.loads((folder / "judge-saved-6000.json").read_text())["facts"], "shared")
+
+        code, out = self.main("report")
+        self.assertEqual(code, 0, out)
+        self.assertIn("| Plain notes | ", out)
+        self.assertIn("| Facts only | ", out)
+        self.assertIn("| – |", out)  # baselines aren't held to the template
+        self.assertIn("| Saved (cap 12,000) vs Plain notes |", out)
+        self.assertNotIn("| Cap 6,000 vs Plain notes |", out)
+
+    def test_split_is_fixed_by_the_key(self):
+        keys = [f"{n:08x}-{n * 7:08x}" for n in range(400)]
+        splits = [cases.split(key) for key in keys]
+        self.assertEqual(splits, [cases.split(key) for key in keys])
+        self.assertTrue(0.2 < splits.count("tune") / len(keys) < 0.4)
+        found = cases.split(KEY)
+        self.assertEqual(self.main("run", "--split", found, "--dry-run")[1].splitlines()[0][:9], "1 case(s)")
+        other = "tune" if found == "test" else "test"
+        self.assertIn("0 case(s)", self.main("run", "--split", other, "--dry-run")[1])
+
+    def test_blinded_export_and_agreement(self):
+        self.main("run", "--caps", "6000", "--baselines", "notes")
+        out = self.tmp / "review"
+        code, printed = self.main("export", "--out", str(out), "--seed", "7")
+        self.assertEqual(code, 0, printed)
+        self.assertEqual(sorted(path.name for path in out.iterdir()), ["README.txt", "case-01.md", "sheet.csv"])
+        key = json.loads((self.tmp / "review.key.json").read_text())
+        labels = key["cases"]["01"]["labels"]
+        self.assertEqual(sorted(labels.values()), ["6000", "notes", "saved"])
+        packet = (out / "case-01.md").read_text()
+        for variant in ("saved", "6000", "notes"):
+            self.assertNotIn(f"Document {variant}", packet)
+        self.assertNotIn(KEY, packet + (out / "sheet.csv").read_text())
+
+        with open(out / "sheet.csv", newline="", encoding="utf-8") as f:
+            rows = list(csv.reader(f))
+        self.assertEqual(rows[0], ["case", "need", "text", "A", "B", "C"])
+        letter = {variant: name for name, variant in labels.items()}
+        filled = [rows[0]]
+        for row in rows[1:]:
+            if row[1] != "best":
+                row[3:6] = ["covered", "covered", "covered"]
+                row[3 + "ABC".index(letter["6000"])] = "missing"
+            filled.append(row)
+        for name in ("ana", "ben"):
+            with open(self.tmp / f"{name}.csv", "w", newline="") as f:
+                csv.writer(f).writerows(filled)
+        code, printed = self.main("agreement", str(self.tmp / "ana.csv"), str(self.tmp / "ben.csv"), "--key", str(self.tmp / "review.key.json"))
+        self.assertEqual(code, 0, printed)
+        self.assertIn("ana: 6000 0%, notes 100%, saved 100%", printed)
+        self.assertIn("ana and ben: 6 items, 100% the same verdict, kappa 1.00", printed)
+        self.assertIn("ana and the model judge: 6 items", printed)
+
+        bad = [row[:] for row in filled]
+        bad[1][3] = "great"
+        with open(self.tmp / "bad.csv", "w", newline="") as f:
+            csv.writer(f).writerows(bad)
+        code, printed = self.main("agreement", str(self.tmp / "bad.csv"), "--key", str(self.tmp / "review.key.json"))
+        self.assertEqual(code, 1)
+        self.assertIn("'great' is not one of covered, partial, missing, wrong", printed)
+
+    def test_kappa(self):
+        from tools.eval import review
+        self.assertEqual(review.kappa([("covered", "covered"), ("missing", "missing")]), 1.0)
+        self.assertAlmostEqual(review.kappa([("covered", "missing"), ("missing", "covered")]), -1.0)
+        self.assertIsNone(review.kappa([]))
 
     def test_report_writes_only_between_the_markers(self):
         self.main("run")

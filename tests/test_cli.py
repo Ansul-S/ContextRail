@@ -32,13 +32,27 @@ class CliTest(TempHome):
             result = self.run_cr("session-start", stdin=stdin)
             self.assertEqual((result.returncode, result.stdout), (0, ""))
 
+    def break_storage(self):
+        """Make every project folder impossible to create, so the next hook fails inside."""
+        self.home.mkdir(parents=True, exist_ok=True)
+        (self.home / "projects").write_text("not a folder")
+
+    def test_malformed_fields_are_ignored(self):
+        result = self.run_cr("stop", stdin=json.dumps({"cwd": 12345, "transcript_path": ["x"], "session_id": {}}))
+        self.assertEqual((result.returncode, result.stdout), (0, ""))
+        self.assertFalse((self.home / "error.log").exists())
+
     def test_errors_are_logged_not_raised(self):
-        result = self.run_cr("stop", stdin=json.dumps({"cwd": 12345, "transcript_path": ["x"]}))
-        self.assertEqual(result.returncode, 0)
+        self.at_tokens(102_000)
+        self.break_storage()
+        result = self.run_cr("stop", stdin=json.dumps(self.payload("Stop", last_assistant_message="ok")))
+        self.assertEqual((result.returncode, result.stdout), (0, ""))
         self.assertTrue((self.home / "error.log").exists())
+        if os.name != "nt":
+            self.assertEqual((self.home / "error.log").stat().st_mode & 0o777, 0o600)
 
     def test_status(self):
-        self.transcript = self.claude / "projects" / store.slug(self.repo) / "session-1.jsonl"
+        self.transcript = self.claude / "projects" / store.claude_slug(self.repo) / "session-1.jsonl"
         self.transcript.parent.mkdir(parents=True)
         self.at_tokens(10_000)
         self.run_cr("stop", stdin=json.dumps(self.payload(
@@ -60,7 +74,10 @@ class CliTest(TempHome):
 
     def test_status_points_at_doctor_after_errors(self):
         self.assertNotIn("Errors:", self.run_cr("status", str(self.repo)).stdout)
-        self.run_cr("stop", stdin=json.dumps({"cwd": 12345, "transcript_path": ["x"]}))  # logs an error
+        self.at_tokens(102_000)
+        self.break_storage()
+        self.run_cr("stop", stdin=json.dumps(self.payload("Stop", last_assistant_message="ok")))  # logs an error
+        (self.home / "projects").unlink()
         self.assertIn("Errors:    1 in the last 24 h. Run /contextrail:doctor", self.run_cr("status", str(self.repo)).stdout)
 
     def test_hooks_record_a_heartbeat(self):

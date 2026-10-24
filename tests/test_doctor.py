@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import time
+import unittest
 from unittest import mock
 
 from contextrail import doctor, handlers, store
@@ -30,7 +31,7 @@ class DoctorTest(TempHome):
         return {result.name: result for result in results}
 
     def session(self, name, entries):
-        folder = self.claude / "projects" / store.slug(self.repo)
+        folder = self.claude / "projects" / store.claude_slug(self.repo)
         folder.mkdir(parents=True, exist_ok=True)
         write_transcript(folder / name, entries)
 
@@ -114,7 +115,7 @@ class DoctorTest(TempHome):
         self.assertEqual(delivery.status, "warn")
         self.assertIn("older than max_age_days (0)", delivery.detail)
 
-        with mock.patch.object(handlers, "on_session_start", lambda payload: {"systemMessage": "x"}):
+        with mock.patch.object(handlers, "load_context", lambda *args: ({"systemMessage": "x"}, "")):
             delivery = self.results()["Handoff"]
         self.assertEqual(delivery.status, "fail")
         self.assertIn("no additionalContext", delivery.detail)
@@ -172,7 +173,7 @@ class DoctorTest(TempHome):
     def test_plugin_hooks(self):
         plugin = self.results()["Plugin"]
         self.assertEqual(plugin.status, "ok")
-        self.assertIn("5 hooks (Stop, PostToolUse, PreCompact, SessionStart, SessionEnd)", plugin.detail)
+        self.assertIn("6 hooks (Stop, StopFailure, PostToolUse, PreCompact, SessionStart, SessionEnd)", plugin.detail)
         with mock.patch.object(handlers, "HOOKS", {**handlers.HOOKS, "notify": ("Notification", None)}):
             plugin = self.results()["Plugin"]
         self.assertEqual(plugin.status, "fail")
@@ -187,6 +188,54 @@ class DoctorTest(TempHome):
     def test_unwritable_storage(self):
         self.home.write_text("a file, not a folder")
         self.assertEqual(self.results()["Storage"].status, "fail")
+
+    def test_project_folder(self):
+        project = store.open_project(self.repo)
+        self.at_tokens(10_000)
+        handlers.on_stop(self.payload("Stop", last_assistant_message=f"<contextrail-handoff>\n{VALID_BODY}\n</contextrail-handoff>"))
+        self.assertEqual(self.results()["Project"].status, "ok")
+        project.state.write_text("{broken")
+        result = self.results()["Project"]
+        self.assertEqual(result.status, "fail")
+        self.assertIn("state.json", result.detail)
+        project.state.unlink()
+        identity = store.read_json(project.identity)
+        project.identity.write_text(json.dumps(dict(identity, canonical="/somewhere/else")))
+        results = self.results()
+        self.assertEqual(results["Project"].status, "fail")
+        self.assertIn("belongs to /somewhere/else", results["Project"].detail)
+        self.assertEqual(results["Handoff"].status, "fail")
+
+    def test_a_legacy_folder_left_in_place_warns(self):
+        legacy = self.home / "projects" / store.claude_slug(self.repo)
+        legacy.mkdir(parents=True)
+        (legacy / "meta.json").write_text(json.dumps({"head": "deadbeef" * 5}))
+        result = self.results()["Project"]
+        self.assertEqual(result.status, "warn")
+        self.assertIn("its commit deadbeefd is not in this repository", result.detail)
+        self.assertIn("/contextrail:purge --legacy", result.detail)
+
+    @unittest.skipIf(os.name == "nt", "file modes are POSIX")
+    def test_privacy(self):
+        store.make_dir(self.home)
+        self.assertEqual(self.results()["Privacy"].status, "ok")
+        (self.home / "HANDOFF.md").write_text("x")
+        (self.home / "HANDOFF.md").chmod(0o644)
+        result = self.results()["Privacy"]
+        self.assertEqual(result.status, "warn")
+        self.assertIn("can be read by other users", result.detail)
+        self.assertIn("chmod -R go-rwx", result.detail)
+
+    def test_claude_code_version(self):
+        self.assertEqual(self.results()["Claude Code"].detail, "version unknown until a session has run here")
+        self.session("a.jsonl", [dict(user(), version="2.1.310"), dict(assistant(9_000), version="2.1.310")])
+        result = self.results()["Claude Code"]
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.detail, "2.1.310; handoff requests reach the agent as hook feedback")
+        self.session("a.jsonl", [dict(assistant(9_000), version="2.1.150")])
+        result = self.results()["Claude Code"]
+        self.assertEqual(result.status, "warn")
+        self.assertIn("older than 2.1.163", result.detail)
 
     def test_a_relative_home_warns(self):
         self.addCleanup(os.chdir, os.getcwd())

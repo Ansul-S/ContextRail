@@ -1,9 +1,10 @@
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-// ContextRail's Stop hook asks for a handoff by blocking the stop with a reason
-// that starts with REQUEST (prompts.request in ContextRail). A later stop whose
-// message holds the handoff block, and that ContextRail lets end, means it saved
-// the handoff; it blocks again only to ask for a fix.
+// ContextRail's Stop hook asks for a handoff by continuing the turn with text that
+// starts with REQUEST (prompts.request in ContextRail): as Stop feedback
+// (additionalContext) on Claude Code 2.1.163 and later, as a blocked stop before.
+// A later stop whose message holds the handoff block, and that ContextRail lets
+// end, means it saved the handoff; it continues the turn again only to ask for a fix.
 const REQUEST = 'ContextRail: this session is at'
 // A request with these words (prompts.CHECKPOINT in ContextRail) asks for a checkpoint before the
 // hard point: work goes on in the session after it, so no new session is offered.
@@ -19,6 +20,12 @@ const QUESTION_END = /\?[*_`'"’”)\]\s]*$/
 // Background task types that are watchers or Claude Code's own chores, not work: they can run for good,
 // so they hold nothing (handlers.PASSIVE in ContextRail; a test keeps them in step).
 const PASSIVE = ['monitor', 'dream', 'auto-mode scan', 'memory import']
+// A one-shot scheduled task due within this long holds the offer, as running work does: its turn
+// is likely to carry the work on. A later one, and a recurring one, doesn't hold it, since that
+// could last for days (recurring tasks expire after 7). A self-paced /loop shows as a one-shot
+// wakeup that schedules the next when it fires, so a one-shot whose prompt was already seen in
+// one that fired counts as recurring.
+const ONE_SHOT_HOLD_MS = 60 * 60 * 1000
 const FALLBACK = 'Continue where the last session stopped. Start with the handoff\'s "Verify first" commands.'
 
 const PANE = 'contextrail-continue'
@@ -28,8 +35,9 @@ const NO = 'Keep this session'
 const KEPT = 'ContextRail: kept this session. The handoff is saved; type /clear when you want to continue from it.'
 const TYPING = 'ContextRail: kept this session because you are typing. Type /clear when you want to continue from the handoff.'
 const HELD =
-  'ContextRail: handoff saved. Background or scheduled tasks are still running; once they finish and their results ' +
-  'are shown, ContextRail offers a new session. Type /clear to continue from the handoff sooner.'
+  'ContextRail: handoff saved. Background tasks are still running, or a task is due to run soon; once they finish ' +
+  'and their results are shown, ContextRail offers a new session. Type /clear to continue from the handoff sooner.'
+const BLOCKED = 'ContextRail: the "Stop hook error" above is ContextRail\'s request to the agent. Nothing failed.'
 // The question waits for the turn to finish ending, so the pane can take the keys.
 const OFFER_DELAY_MS = 500
 
@@ -45,6 +53,83 @@ type State = {
   resume: string | undefined // the resume prompt while the person is asked, or counted down to
   left: number | undefined // seconds left in a Lightning countdown
   offer: Timer | undefined
+  scheduled: string[] // the session's scheduled tasks that don't hold the offer, shown with it
+  oneShots: Map<string, string> // id -> prompt of one-shot tasks seen while an offer was held
+  loops: Set<string> // prompts of one-shot tasks that scheduled themselves again: self-paced loops
+}
+
+type Cron = { id?: string; schedule?: string; recurring?: boolean; prompt?: string }
+
+/**
+ * When a one-shot task's cron expression fires next, for the plain "M H DoM Mon *" form a
+ * one-shot uses (DoM and Mon may be *), in local time; undefined for any other form.
+ */
+function nextFire(schedule: string | undefined, now: number): number | undefined {
+  const fields = (schedule ?? '').trim().split(/\s+/)
+  if (fields.length !== 5 || fields[4] !== '*') {
+    return undefined
+  }
+  const [minute, hour, day, month] = fields.map((field) => (field === '*' ? undefined : Number(field)))
+  if (minute === undefined || hour === undefined || !Number.isInteger(minute) || !Number.isInteger(hour)) {
+    return undefined
+  }
+  if ((day !== undefined && !Number.isInteger(day)) || (month !== undefined && !Number.isInteger(month))) {
+    return undefined
+  }
+  const start = new Date(now)
+  for (let days = 0; days <= 366; days++) {
+    const at = new Date(start.getFullYear(), start.getMonth(), start.getDate() + days, hour, minute)
+    const matches = (day === undefined || at.getDate() === day) && (month === undefined || at.getMonth() + 1 === month)
+    if (matches && at.getTime() >= now - 60_000) {
+      return at.getTime()
+    }
+  }
+  return undefined
+}
+
+/** A scheduled task as the person would recognise it. */
+function cronLabel(cron: Cron): string {
+  const prompt = (cron.prompt ?? 'a prompt').replace(/\s+/g, ' ').trim()
+  return `${prompt.length > 50 ? `${prompt.slice(0, 49)}…` : prompt} (${cron.schedule ?? '?'})`
+}
+
+/**
+ * The scheduled tasks that hold the offer, and those that don't. A one-shot task due soon holds
+ * it, unless it is a self-paced loop's next wakeup; recurring tasks and later one-shots don't.
+ */
+function sortCrons(state: State, crons: Cron[], now: number): { holding: Cron[]; others: Cron[] } {
+  const ids = new Set(crons.map((cron) => cron.id ?? ''))
+  for (const [id, prompt] of [...state.oneShots]) {
+    if (!ids.has(id)) {
+      state.oneShots.delete(id)
+      if (crons.some((cron) => cron.recurring === false && cron.prompt === prompt)) {
+        state.loops.add(prompt) // it fired, and scheduled the same prompt again
+      }
+    }
+  }
+  const holding: Cron[] = []
+  const others: Cron[] = []
+  for (const cron of crons) {
+    const due = nextFire(cron.schedule, now)
+    const isOneShot = cron.recurring === false
+    const isLoop = cron.prompt !== undefined && state.loops.has(cron.prompt)
+    if (isOneShot && !isLoop && (due === undefined || due - now <= ONE_SHOT_HOLD_MS)) {
+      holding.push(cron)
+      state.oneShots.set(cron.id ?? '', cron.prompt ?? '')
+    } else {
+      others.push(cron)
+    }
+  }
+  return { holding, others }
+}
+
+/** ContextRail's request or fix in a Stop result, as a block or as feedback, and which it is. */
+function ownText(result: { block?: string; additionalContext?: readonly string[] }): { text: string; isBlock: boolean } | undefined {
+  if (result.block !== undefined && result.block.startsWith(OWN)) {
+    return { text: result.block, isBlock: true }
+  }
+  const text = (result.additionalContext ?? []).find((context) => context.startsWith(OWN))
+  return text === undefined ? undefined : { text, isBlock: false }
 }
 
 /** The last handoff block in a message, without its tags. */
@@ -244,6 +329,7 @@ export const register: Register = (on, options) => {
   const afterManual = options['after_manual'] === true
   const state: State = {
     isRequested: false, isCheckpoint: false, held: undefined, resume: undefined, left: undefined, offer: undefined,
+    scheduled: [], oneShots: new Map(), loops: new Set(),
   }
 
   // A prompt the person typed means they carry on here: nothing is offered for this handoff.
@@ -269,6 +355,8 @@ export const register: Register = (on, options) => {
     state.held = undefined
     await withdraw($, state)
     state.isRequested = false
+    state.oneShots.clear()
+    state.loops.clear()
     return next(e)
   })
 
@@ -316,10 +404,17 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
+    const scheduled = state.scheduled.length > 0 && (
+      <Text dimColor>
+        Scheduled in this session: {state.scheduled.slice(0, 2).join('; ')}
+        {state.scheduled.length > 2 ? ` and ${state.scheduled.length - 2} more` : ''}. A new session may not run it.
+      </Text>
+    )
     return (
       <Box flexDirection="column">
         <Text>ContextRail saved the handoff.</Text>
         <Text>Press y to start a new Claude Code session. Press n to continue using the current session.</Text>
+        {scheduled}
         <Box flexDirection="row" columnGap={3}>
           <Button key="yes" hotkey="y" plain onPress={() => startNew($, state)}>
             {YES}
@@ -335,16 +430,20 @@ export const register: Register = (on, options) => {
 
   on('classic.Stop', async ($, e, next) => {
     const result = await next(e)
-    if (result.block !== undefined) {
-      if (result.block.startsWith(OWN)) {
+    const own = ownText(result)
+    if (own !== undefined) {
+      if (own.isBlock) {
         // Claude Code labels every blocked stop "Stop hook error"; this one is a request.
-        $.ui.toast('ContextRail: the "Stop hook error" above is ContextRail\'s request to the agent. Nothing failed.')
+        $.ui.toast(BLOCKED)
       }
-      if (result.block.startsWith(REQUEST)) {
+      if (own.text.startsWith(REQUEST)) {
         state.isRequested = true
-        state.isCheckpoint = result.block.includes(CHECKPOINT)
+        state.isCheckpoint = own.text.includes(CHECKPOINT)
       }
       return result
+    }
+    if (result.block !== undefined || (result.additionalContext?.length ?? 0) > 0) {
+      return result // another hook keeps the turn going: this is not where it ends
     }
     const body = handoffOf(e.last_assistant_message)
     const isSaved = body !== undefined && (state.isRequested || afterManual || state.held !== undefined)
@@ -358,15 +457,16 @@ export const register: Register = (on, options) => {
     if (state.held === undefined) {
       return result
     }
-    // Background work still runs, and its results are still to come and be shown in this session.
+    // Background work still runs, or a task is due soon, and its results are still to come in this session.
     const working = (e.background_tasks ?? []).filter((task) => !PASSIVE.includes(task.type))
-    const pending = working.length + (e.session_crons?.length ?? 0)
-    if (pending > 0) {
+    const { holding, others } = sortCrons(state, [...(e.session_crons ?? [])], await $.clock.now())
+    if (working.length + holding.length > 0) {
       if (isSaved) {
         $.ui.toast(HELD)
       }
       return result
     }
+    state.scheduled = others.map(cronLabel)
     // The agent waits for the person's answer: no question or countdown over it. Answering carries on here.
     if (waitsForAnswer(e.last_assistant_message)) {
       return result
@@ -374,7 +474,8 @@ export const register: Register = (on, options) => {
     await withdraw($, state)
     state.resume = state.held
     state.held = undefined
-    if (await isLightning($)) {
+    // Lightning starts a new session by itself only when nothing is scheduled here; with a schedule it asks.
+    if (state.scheduled.length === 0 && (await isLightning($))) {
       state.offer = $.clock.after(OFFER_DELAY_MS, () => void countDown($, state))
     } else {
       state.offer = $.clock.after(OFFER_DELAY_MS, () => void ask($, state))

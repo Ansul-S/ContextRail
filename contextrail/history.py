@@ -25,6 +25,10 @@ class Entry:
     saved_at: str
     summary: str  # the first next step, which tells handoffs apart better than the goal
     size: int
+    where: str = ""  # the branch and commit it was saved at, as `main` at abc1234
+
+    def point(self) -> str:
+        return f", on {self.where}" if self.where else ""
 
     def when(self) -> str:
         if not self.saved_at:
@@ -41,7 +45,15 @@ def _entry(path: Path) -> Optional[Entry]:
     found = handoff.sections(handoff.narrative_of(document))
     lines = [line for line in found.get("next steps", "").splitlines() if line.strip()]
     summary = "Next: " + STEP_MARK.sub("", lines[0]) if lines else "Goal: " + found.get("goal", "?")
-    return Entry(path=path, saved_at=saved.group(1) if saved else "", summary=" ".join(summary.split()), size=len(document))
+    meta = store.read_json(path.with_suffix(".json") if path.suffix == ".md" and path.name != "HANDOFF.md" else path.parent / "meta.json")
+    branch = BRANCH_RE.search(document)
+    head = meta.get("head") or (branch.group(2) if branch else "")
+    name = meta.get("branch") or (branch.group(1) if branch else "")
+    where = f"`{name}` at {str(head)[:9]}" if head else ""
+    return Entry(
+        path=path, saved_at=saved.group(1) if saved else "", summary=" ".join(summary.split()), size=len(document),
+        where=where,
+    )
 
 
 def entries(project: store.Project) -> Tuple[Optional[Entry], List[Entry]]:
@@ -76,6 +88,9 @@ def restore(project: store.Project, number: int, keep: int) -> Entry:
     entry = archived[number - 1]
     document = entry.path.read_text(encoding="utf-8")
     meta = _archived_meta(entry, document)
+    owner = meta.get("project")
+    if isinstance(owner, str) and owner != project.key:
+        raise ValueError(f"archived handoff {number} was saved for another project, {owner}")
     meta["restored_from"] = entry.path.name
     with store.locked(project):
         # keep + 1: the restored file is still in the archive while the current one joins it.
@@ -108,7 +123,7 @@ def main(args: List[str]) -> int:
         print(USAGE)
         return 0 if exit_zero else 2
     root = facts.project_root(str(Path(args[0]).expanduser() if args else Path.cwd()))
-    project = store.Project(root)
+    project = store.open_project(root)
     cfg = config.load(project.dir)
 
     if number is not None:
@@ -117,7 +132,7 @@ def main(args: List[str]) -> int:
         except (ValueError, OSError) as error:
             print(f"ContextRail: {error}.")
             return 0 if exit_zero else 1
-        print(f"Restored the handoff saved {entry.when()}. {_summary(entry)}")
+        print(f"Restored the handoff saved {entry.when()}{entry.point()}, for {root}. {_summary(entry)}")
         print("It loads into the next session (after /clear, or when a session starts here).")
         seconds = age_seconds(entry.saved_at)
         if seconds is not None and seconds > cfg["max_age_days"] * 86_400:
@@ -131,7 +146,7 @@ def main(args: List[str]) -> int:
     print(f"Handoffs for {root}, newest first ({tilde(project.dir)}):")
     rows = ([("current", current)] if current else []) + [(str(i), entry) for i, entry in enumerate(archived, 1)]
     for label, entry in rows:
-        print(f"  {label:>7}  {entry.when()}, {entry.size:,} characters")
+        print(f"  {label:>7}  {entry.when()}{entry.point()}, {entry.size:,} characters")
         print(f"           {_summary(entry)}")
     if archived:
         print("To make an archived one current: /contextrail:history --restore N")

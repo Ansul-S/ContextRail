@@ -1,0 +1,6 @@
+# Lint settings, used by CI: `ruff check .`
+target-version = "py39"
+
+[lint]
+# pyflakes, pycodestyle's error checks, and bugbear's likely bugs.
+select = ["E4", "E7", "E9", "F", "B"]

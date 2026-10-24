@@ -256,7 +256,7 @@ class WindowSourceTest(TempHome):
         self.assertEqual(usage.last_usage(str(self.transcript)).window_source, "model")
 
     def test_status_and_doctor_name_the_source(self):
-        folder = self.claude / "projects" / store.slug(self.repo)
+        folder = self.claude / "projects" / store.claude_slug(self.repo)
         folder.mkdir(parents=True)
         write_transcript(folder / f"{SESSION}.jsonl", [user(), assistant(50_000, model="claude-haiku-5-5")])
         statusline.record(sample(str(self.repo)))
@@ -300,6 +300,8 @@ class SetupTest(TempHome):
         self.assertEqual(path.read_bytes(), before)
         launcher = self.home / "bin" / "statusline"
         self.assertTrue(os.access(launcher, os.X_OK))
+        self.assertEqual(launcher.stat().st_mode & 0o777, store.PRIVATE_PROGRAM)
+        self.assertEqual((self.home / "bin").stat().st_mode & 0o777, store.PRIVATE_DIR)
         entry = {"type": "command", "command": f"{launcher} -- 'printf '\"'\"'gsd %s'\"'\"' line | cat'", "padding": 0}
         self.assertIn(f'  "statusLine": {json.dumps(entry)}\n', out)
         self.assertIn("ContextRail never edits that file", out)

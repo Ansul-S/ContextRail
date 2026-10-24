@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import List
 
-from . import __version__, config, doctor, facts, store
+from . import __version__, config, doctor, facts, handlers, store
 from .config import tilde
 from .handlers import age_seconds, describe_age
-from .usage import DEFAULT_WINDOW, last_usage, start_tokens, transcripts
+from .usage import DEFAULT_WINDOW, claude_version, last_usage, start_tokens, transcripts
 
 
 def main(args: List[str]) -> int:
     cwd = Path(args[0]).expanduser() if args else Path.cwd()
     root = facts.project_root(str(cwd))
-    project = store.Project(root)
+    project = store.open_project(root)
     cfg = config.load(project.dir)
     print(f"ContextRail {__version__}{'' if cfg['enabled'] else ' (disabled)'}")
     print(f"Project:   {root}")
@@ -43,6 +44,20 @@ def main(args: List[str]) -> int:
         print(f"Why:       {why[0]}")
         for line in why[1:]:
             print(f"Warning:   {line}")
+    if found:
+        payload = {"transcript_path": str(found[0])}
+        version = claude_version(str(found[0]))
+        how = "as hook feedback" if handlers.feedback_supported(payload, cfg) else 'as a blocked stop, labelled "Stop hook error"'
+        shown = f"Claude Code {'.'.join(map(str, version))}" if version else "Claude Code version unknown"
+        print(f"Requests:  {how} ({shown}, request_style {cfg['request_style']})")
+        entry = store.load_state(project)["sessions"].get(found[0].stem) or {}
+        trigger = entry.get("trigger") if isinstance(entry.get("trigger"), dict) else None
+        if trigger and isinstance(trigger.get("tokens"), int):
+            print(f"Asked:     at {trigger['tokens']:,} tokens for a {trigger.get('kind', 'final')} handoff: {trigger.get('because', '')}")
+        failure = entry.get("failure") if isinstance(entry.get("failure"), dict) else None
+        if failure and isinstance(failure.get("time"), (int, float)):
+            ago = describe_age(time.time() - failure["time"])
+            print(f"API error: the latest turn that failed ended on {failure.get('error')} {ago}; the saved handoff was kept")
     if cfg["lightning_tokens"]:
         print(f"Lightning: on at {cfg['lightning_tokens']:,}: a new session starts after the handoff (/contextrail:lightning)")
     errors = doctor.recent_errors(doctor.DAY)
@@ -52,12 +67,15 @@ def main(args: List[str]) -> int:
     if not project.handoff.exists():
         print("Handoff:   none saved yet")
         return 0
-    meta = store.read_json(project.meta)
-    size = len(project.handoff.read_text(encoding="utf-8"))
+    document, meta, problems = store.read_handoff(project)
+    if document is None:
+        print(f"Handoff:   saved, but it won't load: {problems[0] if problems else 'it can not be read'}")
+        return 0
     archived = len(store.archived(project))
     age = describe_age(age_seconds(str(meta.get("saved_at") or "")))
-    print(f"Handoff:   saved {age}, {size:,} characters, {archived} older in history")
+    print(f"Handoff:   saved {age}, {len(document):,} characters, {archived} older in history")
     print(f"           {tilde(project.handoff)}")
-    for note in facts.drift(meta, root).notes:
+    found_drift = facts.drift(meta, root) if not problems else facts.Drift([problems[0]], [], [], False)
+    for note in found_drift.notes:
         print(f"Drift:     {note}")
     return 0

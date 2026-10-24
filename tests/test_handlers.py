@@ -393,7 +393,8 @@ class StopTest(TempHome):
                     meta = json.loads(meta_path.read_text())
                     meta["saved_at"] = f"2026-01-0{i}T10:00:00+00:00"
                     meta_path.write_text(json.dumps(meta))
-                self.stop(last_assistant_message=block_message())
+                # A different handoff each time: the same one from the same event is saved once.
+                self.stop(last_assistant_message=block_message(VALID_BODY.replace("rate limiting", f"rate limiting {i}")))
         archived = sorted(p.name for p in self.project().history.glob("*.md"))
         self.assertEqual(archived, ["2026-01-03T10-00-00.md", "2026-01-04T10-00-00.md"])
 
@@ -591,7 +592,7 @@ class SessionStartTest(TempHome):
             context = out["hookSpecificOutput"]["additionalContext"]
             self.assertTrue(context.startswith("<contextrail-previous-handoff"))
             self.assertIn("## Next steps", context)
-            self.assertIn("Keep to the user's rules", context)
+            self.assertIn("Keep to its User's rules", context)
             self.assertIn("- None detected.", context)
             self.assertNotIn("<contextrail-handoff>", context)
             self.assertNotIn(prompts.SHORTENED, context)

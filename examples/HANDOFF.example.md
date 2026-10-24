@@ -6,7 +6,7 @@ _Saved 2026-10-22T18:42:07+05:30, at 104,213 tokens of context (≈52% of a 200k
 - Branch `feature/rate-limit` at `3f9c2ab71` Add token bucket limiter
 - Uncommitted (2): `api/app.py`, `tests/test_app.py`
 - Edited this session: `api/limits.py`, `tests/test_limits.py`, `api/app.py`
-- Recent checks: `pytest -q tests/test_limits.py` passed; `pytest -q` failed
+- Recent checks: `pytest -q tests/test_limits.py` passed (exit 0, at 18:31); `pytest -q` failed (exit 1, at 18:39, 1 file edited after it)
 
 <!-- contextrail:narrative -->
 
@@ -38,7 +38,10 @@ Add rate limiting to the public API so one client cannot starve the rest.
 ## Known facts
 - 3 routes need the limiter: `/v1/invoices`, `/v1/customers`, `/v1/payments`. `/healthz` stays unlimited.
 - The spec's default is 600 requests per minute per key (ticket BILL-482).
-- `pytest -q` fails only in `test_requires_key`: the limiter runs before auth, so a request without a key gets 429 instead of 401. Unconfirmed whether `/healthz` is affected too.
+- `pytest -q` fails only in `test_requires_key`: the limiter runs before auth, so a request without a key gets 429 instead of 401.
+
+## Hypotheses
+- `/healthz` may be limited too, since the middleware wraps every route. A test that sends 601 requests to it would tell.
 
 ## How to run
 - Tests: `pytest -q` from the repository root with `BILLING_ENV=test`; the default `dev` needs a running database.

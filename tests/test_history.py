@@ -62,6 +62,26 @@ class HistoryTest(TempHome):
         loaded = handlers.on_session_start(self.payload("SessionStart", source="clear"))
         self.assertIn("1. Run `first step`", loaded["hookSpecificOutput"]["additionalContext"])
 
+    def test_says_where_each_handoff_was_saved_and_for_which_project(self):
+        self.save("first step")
+        self.save("second step")
+        head = facts.git_state(self.repo).head[:9]
+        _, out = self.run_history()
+        self.assertIn(f", on `main` at {head}, ", out.splitlines()[1])
+        _, out = self.run_history("--restore", "1")
+        self.assertIn(f"(just now), on `main` at {head}, for {self.repo}.", out)
+
+    def test_an_archive_of_another_project_is_not_restored(self):
+        self.save("first step")
+        self.save("second step")
+        archive = store.archived(self.project())[0].with_suffix(".json")
+        archive.write_text(json.dumps(dict(json.loads(archive.read_text()), project="/somewhere/else")))
+        current = self.project().handoff.read_text()
+        code, out = self.run_history("--restore", "1")
+        self.assertEqual(code, 1)
+        self.assertIn("was saved for another project, /somewhere/else", out)
+        self.assertEqual(self.project().handoff.read_text(), current)
+
     def test_restore_an_archive_from_before_meta_was_kept(self):
         self.save("old step")
         self.save("new step")
@@ -75,9 +95,12 @@ class HistoryTest(TempHome):
         meta = json.loads(self.project().meta.read_text())
         self.assertIsNone(meta["dirty"])
         self.assertEqual(len(meta["head"]), 9)
-        notes = facts.drift(meta, self.repo).notes
-        self.assertEqual(len(notes), 1)
-        self.assertIn("1 new commit(s) since the handoff: ", notes[0])
+        found = facts.drift(meta, self.repo)
+        self.assertEqual(len(found.notes), 2)
+        self.assertIn("1 new commit(s) since the handoff: ", found.notes[0])
+        # Without the uncommitted files of the time, file changes can't be told, and it says so.
+        self.assertIn("can't be checked", found.notes[1])
+        self.assertFalse(found.verified)
 
     def test_bad_number_and_usage(self):
         self.save("only step")

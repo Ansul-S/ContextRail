@@ -46,7 +46,7 @@ class ActivityTest(TempHome):
             tool_use("b4", "Bash", {"command": "pnpm build"}),
         )
         self.assertEqual(activity.edited, ["lib.py", "app.py"])
-        self.assertEqual(activity.checks, [("pytest -q tests/", "passed"), ("pnpm build", "result unknown")])
+        self.assertEqual(activity.results(), [("pytest -q tests/", "passed"), ("pnpm build", "result unknown")])
 
     def test_heredoc_body_is_not_a_check(self):
         command = "cat > scripts/ci.sh <<'EOF'\nset -e\npython -m unittest discover\nEOF\nchmod +x scripts/ci.sh"
@@ -55,27 +55,29 @@ class ActivityTest(TempHome):
     def test_failed_summary_behind_a_pipe(self):
         command = f"cd {self.repo} && python3 -m unittest discover -s tests -t . 2>&1 | tail -3"
         output = "Ran 12 tests in 0.4s\n\nFAILED (failures=1)"
-        checks = self.activity(*self.bash("b1", command, output)).checks
+        checks = self.activity(*self.bash("b1", command, output)).results()
         self.assertEqual(checks, [("python3 -m unittest discover -s tests -t .", "failed")])
 
     def test_pytest_summary(self):
-        for output, expected in (("=== 2 failed, 40 passed in 1.21s ===", "failed"), ("42 passed, 1 skipped in 0.9s", "passed")):
+        # A pipe hides pytest's exit status: a passing summary is what it says, not a verified pass.
+        cases = (("=== 2 failed, 40 passed in 1.21s ===", "failed"), ("42 passed, 1 skipped in 0.9s", "output says passed"))
+        for output, expected in cases:
             with self.subTest(output=output):
-                checks = self.activity(*self.bash("b1", "pytest -q | tail -1", output)).checks
+                checks = self.activity(*self.bash("b1", "pytest -q | tail -1", output)).results()
                 self.assertEqual(checks, [("pytest -q", expected)])
 
     def test_pipe_without_a_summary_only_ran(self):
-        self.assertEqual(self.activity(*self.bash("b1", "pnpm build | tail -5", "done")).checks, [("pnpm build", "ran")])
+        self.assertEqual(self.activity(*self.bash("b1", "pnpm build | tail -5", "done")).results(), [("pnpm build", "ran")])
 
     def test_output_decides_when_the_exit_status_is_masked(self):
-        checks = self.activity(*self.bash("b1", "pytest -q || true", "1 failed, 2 passed in 0.1s")).checks
+        checks = self.activity(*self.bash("b1", "pytest -q || true", "1 failed, 2 passed in 0.1s")).results()
         self.assertEqual(checks, [("pytest -q", "failed")])
 
     def test_exit_status_decides_without_a_pipe(self):
         checks = self.activity(
             *self.bash("b1", "cd sub && npm test", is_error=True),
             *self.bash("b2", "make lint && echo done", "no summary here"),
-        ).checks
+        ).results()
         self.assertEqual(checks, [("npm test", "failed"), ("make lint", "passed")])
 
     def test_commands_that_did_not_run_or_finish(self):
@@ -83,17 +85,92 @@ class ActivityTest(TempHome):
             *self.bash("b1", "pytest -q", "Permission to use Bash with command pytest -q has been denied.", is_error=True),
             *self.bash("b2", "npm run e2e", "Command running in background with ID: b2.", run_in_background=True),
             tool_use("b3", "Bash", {"command": "cargo test"}),
-        ).checks
+        ).results()
         self.assertEqual(
-            checks, [("pytest -q", "result unknown"), ("npm run e2e", "result unknown"), ("cargo test", "result unknown")]
+            checks, [("pytest -q", "result unknown"), ("npm run e2e", "no result yet"), ("cargo test", "result unknown")]
         )
 
     def test_content_blocks_and_long_commands(self):
         output = [{"type": "text", "text": "Ran 3 tests in 0.1s\n\nOK"}]
         command = "python3 -m unittest tests/" + "x" * 100 + " 2>&1 | tail -1; python3 -m unittest"
-        [(shown, result)] = self.activity(*self.bash("b1", command, output)).checks
-        self.assertEqual(result, "passed")
+        [(shown, result)] = self.activity(*self.bash("b1", command, output)).results()
+        self.assertEqual(result, "output says passed")
         self.assertEqual(shown, "python3 -m unittest tests/" + "x" * 53 + "… (+1 more)")
+
+    def notice(self, tool_id, status, summary, task_id="t1"):
+        text = (
+            f"<task-notification>\n<task-id>{task_id}</task-id>\n<tool-use-id>{tool_id}</tool-use-id>\n"
+            f"<output-file>/tmp/x.output</output-file>\n<status>{status}</status>\n<summary>{summary}</summary>\n"
+            "</task-notification>"
+        )
+        return {"type": "user", "isSidechain": False, "message": {"role": "user", "content": text}}
+
+    def test_a_timed_out_or_interrupted_check_is_not_a_failure(self):
+        checks = self.activity(
+            *self.bash("b1", "pytest -q", "Exit code 143\nCommand timed out after 2m 0s", is_error=True),
+            *self.bash("b2", "npm test", "[Request interrupted by user for tool use]", is_error=True),
+            *self.bash("b3", "cargo test", "Exit code 137\nKilled", is_error=True),
+        ).checks
+        self.assertEqual([(c.command, c.result, c.exit_code) for c in checks], [
+            ("pytest -q", "timed out", 143), ("npm test", "interrupted", None), ("cargo test", "stopped", 137),
+        ])
+        self.assertFalse(any(check.verified for check in checks))
+
+    def test_a_check_moved_to_the_background_takes_the_result_its_notification_gives(self):
+        moved = "Command was moved to the background (ID: bx1) so that a message that arrived while it was running can reach you; it was not interrupted."
+        cases = (
+            ("completed", 'Background command "pytest" completed (exit code 0)', "passed", 0),
+            ("failed", 'Background command "pytest" failed with exit code 1', "failed", 1),
+            ("killed", 'Background command "pytest" was stopped', "stopped", None),
+            ("failed", 'Background command "pytest" failed with exit code 143', "stopped", 143),
+        )
+        for status, summary, result, code in cases:
+            with self.subTest(summary=summary):
+                [check] = self.activity(*self.bash("b1", "pytest -q", moved), self.notice("b1", status, summary)).checks
+                self.assertEqual((check.result, check.exit_code), (result, code))
+        # Without the notification it is still running: never "passed" on the strength of is_error being false.
+        [check] = self.activity(*self.bash("b1", "pytest -q", moved)).checks
+        self.assertEqual(check.result, "no result yet")
+
+    def test_a_background_check_is_resolved_by_its_task_id_too(self):
+        started = "Command running in background with ID: bg7. Output is being written to: /tmp/bg7.output"
+        entries = [*self.bash("b1", "npm test", started, run_in_background=True)]
+        notice = self.notice("", "completed", 'Background command "npm test" completed (exit code 0)', task_id="bg7")
+        [check] = self.activity(*entries, notice).checks
+        self.assertEqual(check.result, "passed")
+        # A pipe hides the check's own status, so the command's exit 0 only says it ran.
+        entries = [*self.bash("b1", "npm test | tail -3", started, run_in_background=True)]
+        [check] = self.activity(*entries, notice).checks
+        self.assertEqual(check.result, "ran")
+
+    def test_a_passing_summary_from_a_command_that_failed_is_unknown(self):
+        [check] = self.activity(*self.bash("b1", "pytest -q | tee log.txt", "Exit code 1\n42 passed in 0.5s", is_error=True)).checks
+        self.assertEqual((check.result, check.evidence), ("result unknown", "output"))
+        self.assertFalse(check.verified)
+
+    def test_chained_commands_keep_the_checks_own_status(self):
+        checks = self.activity(
+            *self.bash("b1", "cd api && pytest -q && echo ok", "3 passed"),
+            *self.bash("b2", "ruff check .; echo done", "Exit code 0"),
+        ).checks
+        self.assertEqual([(c.command, c.result) for c in checks], [("pytest -q", "passed"), ("ruff check .", "ran")])
+        self.assertTrue(checks[0].verified)
+
+    def test_records_where_and_when_a_check_ran_and_what_changed_after_it(self):
+        def at(entry, cwd, stamp):
+            return dict(entry, cwd=cwd, timestamp=stamp)
+        run = self.bash("b1", "pytest -q", "3 passed")
+        activity = self.activity(
+            at(run[0], str(self.repo / "api"), "2026-10-24T08:00:00.000Z"), run[1],
+            tool_use("e1", "Edit", {"file_path": str(self.repo / "app.py")}),
+            tool_use("e2", "Edit", {"file_path": str(self.repo / "lib.py")}),
+            *self.bash("g1", "git stash", ""),
+        )
+        [check] = activity.checks
+        self.assertEqual((check.cwd, check.at, check.edits_after, check.git_after), ("api", "2026-10-24T08:00:00.000Z", 2, True))
+        self.assertEqual(check.to_json()["verified"], True)
+        later = self.activity(tool_use("e1", "Edit", {"file_path": str(self.repo / "app.py")}), *run)
+        self.assertEqual((later.checks[0].edits_after, later.checks[0].git_after), (0, False))
 
     def test_files_outside_the_project_are_counted(self):
         activity = self.activity(
@@ -106,6 +183,15 @@ class ActivityTest(TempHome):
 
     def test_missing_transcript(self):
         self.assertEqual(facts.session_activity(str(self.tmp / "nope.jsonl"), self.repo), facts.Activity())
+
+    def test_entries_of_the_wrong_shape_are_skipped(self):
+        path = write_transcript(self.transcript, [
+            {"type": "assistant", "message": "tool_use"},
+            {"type": "user", "message": ["tool_result"]},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "x", "name": ["Edit"], "input": {}}]}},
+            tool_use("t1", "Edit", {"file_path": str(self.repo / "app.py")}),
+        ])
+        self.assertEqual(facts.session_activity(path, self.repo).edited, ["app.py"])
 
 
 class CommandTest(unittest.TestCase):
@@ -166,9 +252,81 @@ class CommandTest(unittest.TestCase):
 
 
 class DriftTest(TempHome):
-    def meta(self):
+    def meta(self, hashes=False):
         state = facts.git_state(self.repo)
-        return {"branch": state.branch, "head": state.head, "dirty": state.dirty, "diff_hash": state.diff_hash}
+        meta = {"branch": state.branch, "head": state.head, "dirty": state.dirty, "diff_hash": state.diff_hash}
+        if hashes:
+            meta["file_hashes"] = facts.uncommitted_hashes(self.repo)
+        return meta
+
+    def test_a_committed_rename_is_named_and_the_old_name_counts_as_changed(self):
+        meta = self.meta(hashes=True)
+        git(self.repo, "mv", "app.py", "main.py")
+        git(self.repo, "commit", "-qm", "rename")
+        found = facts.drift(meta, self.repo)
+        self.assertEqual(found.renamed, [("app.py", "main.py")])
+        self.assertTrue(any("Renamed since the handoff: app.py → main.py." in note for note in found.notes))
+        self.assertIn("app.py", found.changed)
+
+    def test_a_plain_move_is_found_by_content(self):
+        (self.repo / "notes.txt").write_text("draft\n")
+        meta = self.meta(hashes=True)
+        (self.repo / "app.py").rename(self.repo / "server.py")
+        (self.repo / "notes.txt").rename(self.repo / "NOTES.md")
+        found = facts.drift(meta, self.repo)
+        self.assertEqual(found.renamed, [("app.py", "server.py"), ("notes.txt", "NOTES.md")])
+        self.assertTrue(found.verified)
+
+    def test_a_change_by_someone_else_between_sessions_is_found(self):
+        meta = self.meta(hashes=True)
+        (self.repo / "app.py").write_text("print('edited in another editor')\n")
+        found = facts.drift(meta, self.repo)
+        self.assertEqual(found.changed, ["app.py"])
+
+    def test_a_worktree_is_its_own_project(self):
+        tree = self.tmp / "tree"
+        git(self.repo, "worktree", "add", "-q", "-b", "feature", str(tree))
+        state = facts.git_state(tree)
+        self.assertEqual((state.branch, state.worktree_of), ("feature", str(self.repo)))
+        self.assertEqual(facts.git_state(self.repo).worktree_of, "")
+        meta = {"branch": state.branch, "head": state.head, "dirty": [], "diff_hash": state.diff_hash, "file_hashes": {}}
+        (tree / "app.py").write_text("print('in the worktree')\n")
+        self.assertEqual(facts.drift(meta, tree).changed, ["app.py"])
+        self.assertEqual(facts.drift(self.meta(hashes=True), self.repo).changed, [])
+
+    def test_rewritten_history_is_unverified(self):
+        (self.repo / "app.py").write_text("print('v2')\n")
+        git(self.repo, "commit", "-qam", "second")
+        meta = self.meta(hashes=True)
+        git(self.repo, "reset", "-q", "--hard", "HEAD~1")
+        git(self.repo, "reflog", "expire", "--expire=now", "--all")
+        git(self.repo, "gc", "-q", "--prune=now")
+        found = facts.drift(meta, self.repo)
+        self.assertFalse(found.verified)
+        self.assertTrue(any("no longer in its history" in note for note in found.notes))
+
+    def test_missing_git_or_missing_state_is_said_not_hidden(self):
+        meta = self.meta(hashes=True)
+        self.assertFalse(facts.drift({}, self.repo).verified)
+        no_git = self.tmp / "copy"
+        no_git.mkdir()
+        found = facts.drift(meta, no_git)
+        self.assertFalse(found.verified)
+        self.assertIn("git can't read this folder now", found.notes[0])
+        self.assertFalse(facts.drift({"saved_at": "x", "head": None}, self.repo).verified)
+
+    def test_outside_git_the_files_the_session_edited_are_checked(self):
+        plain = self.tmp / "plain"
+        plain.mkdir()
+        (plain / "a.py").write_text("a\n")
+        (plain / "b.py").write_text("b\n")
+        meta = {"saved_at": "x", "head": None, "edited_hashes": facts.edited_hashes(plain, ["a.py", "b.py"])}
+        self.assertEqual(facts.drift(meta, plain).changed, [])
+        (plain / "a.py").write_text("changed\n")
+        (plain / "b.py").unlink()
+        found = facts.drift(meta, plain)
+        self.assertEqual((found.changed, found.verified), (["a.py", "b.py"], True))
+        self.assertIn("only the files edited in the earlier session were checked", found.notes[0])
 
     def test_no_changes(self):
         self.assertEqual(facts.drift(self.meta(), self.repo).notes, [])

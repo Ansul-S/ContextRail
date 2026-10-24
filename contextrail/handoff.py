@@ -3,10 +3,11 @@ render the saved file with the script-recorded facts on top."""
 
 from __future__ import annotations
 
+import datetime as dt
 import re
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from .facts import MAX_LISTED, Activity, GitState, find_check
+from .facts import MAX_LISTED, PASSING, Activity, CheckRun, GitState, find_check
 
 TAG = "contextrail-handoff"
 BLOCK_RE = re.compile(r"<contextrail-handoff>\s*(.*?)\s*</contextrail-handoff>", re.S)
@@ -34,15 +35,45 @@ ALIASES = {
     "dead end": "dead ends",
     "decision": "decisions",
     "verify": "verify first",
+    "hypothesis": "hypotheses",
+    "assumptions": "hypotheses",
+    "unconfirmed": "hypotheses",
+    "open question": "open questions",
 }
 MAX_RESUME_CHARS = 800
 # Sections that may lose their last items when the handoff is too long to load whole, least
 # needed first. Goal, User's rules, In progress, Next steps, Verify first and Resume prompt stay whole.
-TRIM_ORDER = ("known facts", "dead ends", "decisions", "how to run", "done", "open questions")
+TRIM_ORDER = ("known facts", "dead ends", "hypotheses", "decisions", "how to run", "done", "open questions")
 SECTION_START_RE = re.compile(r"^##[ \t]", re.M)
 CUT_OFF = "… The rest is cut; read the full handoff."
 # Sections whose items the drift check holds against the files changed since.
-CLAIM_SECTIONS = ("done", "in progress")
+CLAIM_SECTIONS = ("done", "in progress", "known facts", "hypotheses", "next steps", "verify first")
+# What kind of information each section holds, for the structured copy saved in meta.json.
+KINDS = {
+    "users rules": "user_instruction",
+    "done": "verified_result",
+    "known facts": "observed_fact",
+    "hypotheses": "inference",
+    "open questions": "open_question",
+    "in progress": "unverified_work",
+    "next steps": "next_step",
+    "decisions": "decision",
+    "dead ends": "dead_end",
+    "how to run": "procedure",
+    "verify first": "verification_step",
+}
+# Items that record an approval for an action that is hard to undo or reaches outside the machine.
+# Flagged when the handoff loads, so an old approval is not read as permission for a new action.
+APPROVAL_RE = re.compile(r"\b(approv\w*|allow(ed|s)?|permission|go[- ]ahead|ok(ay)?['’]?d|consent\w*|authori[sz]\w*|said yes)\b", re.I)
+RISKY_RE = re.compile(
+    r"\b(delet\w*|remov\w*|drop\w*|force|push\w*|deploy\w*|publish\w*|releas\w*|send\w*|email\w*|post\w*"
+    r"|migrat\w*|rm\b|reset|rebase|overwrit\w*|chmod|chown|sudo|permission\w*|credential\w*|secret\w*|pay\w*|purchas\w*"
+    r"|merg\w*|commit\w*|tag\w*)",
+    re.I,
+)
+APPROVAL_SECTIONS = ("users rules", "decisions", "done", "known facts", "next steps", "in progress")
+MAX_APPROVALS = 3
+WRAPPER = "contextrail-previous-handoff"
 BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 EXCERPT_CHARS = 60
 # Content checks against the recorded facts. They are kept loose on purpose:
@@ -146,10 +177,11 @@ def content_problems(body: str, activity: Activity, dirty: List[str]) -> List[st
     steps = _items(found.get("next steps", ""))
     if steps and not WAITING_RE.search(steps[0]) and not CONCRETE_RE.search(steps[0]):
         issues.append("make step 1 of '## Next steps' concrete: name the file, function or command")
-    for i, (command, result) in enumerate(activity.checks):
+    results = activity.results()
+    for i, (command, result) in enumerate(results):
         if result != "failed":
             continue
-        superseded = any(later == "passed" and TEST_RUN_RE.search(c) for c, later in activity.checks[i + 1:])
+        superseded = any(later in PASSING and TEST_RUN_RE.search(c) for c, later in results[i + 1:])
         if any(_claims_pass(item, command, superseded) for item in done):
             issues.append(
                 f"the facts show `{command}` failed, but '## Done' says it passed: correct that, or run it again"
@@ -290,6 +322,72 @@ def _edited(activity: Activity) -> str:
     return text
 
 
+def _clock(stamp: Optional[str]) -> str:
+    """HH:MM in local time for a transcript's ISO 8601 timestamp, or ""."""
+    if not stamp:
+        return ""
+    try:
+        then = dt.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    return (then.astimezone() if then.tzinfo else then).strftime("%H:%M")
+
+
+def describe_check(run: CheckRun) -> str:
+    """`command` result (how it is known, when, what changed after it), as the facts list it."""
+    detail = []
+    if run.evidence == "exit status" and run.exit_code is not None:
+        detail.append(f"exit {run.exit_code}")
+    elif run.result == "output says passed":
+        detail.append("exit status hidden by a pipe or a later command")
+    elif run.result == "result unknown" and run.evidence == "output":
+        detail.append("its output and exit status disagree")
+    if run.cwd and run.cwd != ".":
+        detail.append(f"in {run.cwd}")
+    clock = _clock(run.at)
+    if clock:
+        detail.append(f"at {clock}")
+    if run.edits_after:
+        detail.append(f"{run.edits_after} file{'' if run.edits_after == 1 else 's'} edited after it")
+    if run.git_after:
+        detail.append("git changed the tree after it")
+    return f"`{run.command}` {run.result}" + (f" ({', '.join(detail)})" if detail else "")
+
+
+def structured(body: str) -> List[Dict[str, Any]]:
+    """The handoff's items with the kind of information each one is (KINDS), for meta.json."""
+    items = []
+    for key, text in sections(body).items():
+        kind = KINDS.get(key)
+        if kind is None:
+            continue
+        for item in _items(text):
+            if not NOTHING_RE.fullmatch(item.strip(" .")):
+                items.append({"kind": kind, "section": key, "text": item})
+    return items
+
+
+def approvals(narrative: str) -> List[str]:
+    """Items that record an approval of an action that is hard to undo or reaches outside the
+    machine, as excerpts. Such an approval covered its moment, not the next session's actions."""
+    found = sections(narrative)
+    hits: List[str] = []
+    for key in APPROVAL_SECTIONS:
+        for item in _items(found.get(key, "")):
+            approval = APPROVAL_RE.search(item)
+            if approval and RISKY_RE.search(item):
+                excerpt = _excerpt(item, approval)
+                if excerpt not in hits:
+                    hits.append(excerpt)
+    return hits
+
+
+def neutralize(document: str) -> str:
+    """The document with any tag of the wrapper it loads in defused, so text quoted inside it
+    can't end the wrapper early and pass itself off as ContextRail's own instructions."""
+    return re.sub(rf"<(/?)({WRAPPER})", r"<\1\2-quoted", document, flags=re.I)
+
+
 def render(
     project: str,
     saved_at: str,
@@ -315,7 +413,7 @@ def render(
     if activity.edited or activity.outside:
         lines.append("- Edited this session: " + _edited(activity))
     if activity.checks:
-        lines.append("- Recent checks: " + "; ".join(f"`{cmd}` {result}" for cmd, result in activity.checks))
+        lines.append("- Recent checks: " + "; ".join(describe_check(run) for run in activity.checks))
     for note in notes:
         lines += ["", f"> {note}"]
     lines += ["", NARRATIVE_MARK, "", body.strip(), ""]

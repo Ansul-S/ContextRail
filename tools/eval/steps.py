@@ -1,5 +1,5 @@
-"""The model calls of an evaluation run: regenerate a case's handoff under a cap, list
-what session B needed, and judge two handoffs against those needs. Each call is one
+"""The model calls of an evaluation run: regenerate a case's handoff under a cap (and, for the
+baselines, plain notes), list what session B needed, and judge two handoffs against those needs. Each call is one
 `claude -p` that saves no transcript, and each writes one JSON file in the case's folder."""
 
 from __future__ import annotations
@@ -9,8 +9,9 @@ import os
 import re
 import subprocess
 from dataclasses import dataclass
+from itertools import permutations
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from contextrail import handoff, prompts
 
@@ -19,6 +20,18 @@ from .cases import Case
 
 # The variant for the handoff A wrote and saved; the others are named by their cap.
 SAVED = "saved"
+# The version of the method: the case finder, the prompts and the numbers. 1 was the run of 23 October
+# 2026; 2 added the baselines, the held-out split and the human review, and judges ContextRail's own
+# handoffs the same way as 1 did.
+BENCHMARK = 2
+# Baselines ContextRail's handoff is measured against (docs/eval.md).
+NOTES = "notes"  # notes the session writes when asked plainly: no template, no rules, no recorded facts
+FACTS = "facts"  # the facts ContextRail records, without the narrative the agent writes
+BASELINES = (NOTES, FACTS)
+NOTES_PROMPT = (
+    "Write notes for whoever continues this work in a new session, so they can pick up where you left off. "
+    "Reply with the notes only."
+)
 VERDICTS = ("covered", "partial", "missing", "wrong")
 KINDS = ("used", "rechecked", "reexplained", "mistake")
 MAX_NEEDS = 25
@@ -67,6 +80,31 @@ Reply with JSON only, no other text:
 <facts>
 {facts}
 </facts>
+
+<handoff-1>
+{first}
+</handoff-1>
+
+<handoff-2>
+{second}
+</handoff-2>
+
+<needs>
+{needs}
+</needs>"""
+
+# For a pair with a baseline: no facts are shared, as a baseline doesn't get ContextRail's.
+JUDGE_ALONE_PROMPT = """You are judging two handoff documents. Both were written at the same point of the same coding session, for the next session to continue from. Each one below is everything the next session would get.
+
+For each need in the list, judge each handoff:
+- covered: it gives the information, specific enough to act on.
+- partial: it gives part of it, or only vaguely.
+- missing: it doesn't give it.
+- wrong: it says something that contradicts it.
+Then say which handoff would serve the next session better: "1", "2" or "tie". Judge the content, not the length or the format.
+
+Reply with JSON only, no other text:
+{{"verdicts": [{{"id": 1, "h1": "covered", "h2": "missing"}}], "better": "1"}}
 
 <handoff-1>
 {first}
@@ -182,12 +220,25 @@ def parse_json(reply: str) -> Any:
     raise EvalError("no JSON in the reply")
 
 
-def variants(caps: List[int]) -> List[str]:
-    return [SAVED] + [str(cap) for cap in caps]
+def variants(caps: List[int], baselines: Sequence[str] = ()) -> List[str]:
+    return [SAVED] + [str(cap) for cap in caps] + list(baselines)
+
+
+def pairs(caps: List[int], baselines: Sequence[str] = ()) -> List[Tuple[str, str]]:
+    """The judgings to make, each pair in both orders: every two of ContextRail's handoffs, and each
+    baseline against the saved handoff."""
+    found = list(permutations(variants(caps), 2))
+    for baseline in baselines:
+        found += [(SAVED, baseline), (baseline, SAVED)]
+    return found
 
 
 def gen_path(h: Harness, case: Case, cap: int) -> Path:
     return h.case_dir(case) / f"gen-{cap}.json"
+
+
+def notes_path(h: Harness, case: Case) -> Path:
+    return h.case_dir(case) / f"gen-{NOTES}.json"
 
 
 def needs_path(h: Harness, case: Case) -> Path:
@@ -201,16 +252,33 @@ def judge_path(h: Harness, case: Case, first: str, second: str) -> Path:
 def body(h: Harness, case: Case, variant: str) -> str:
     if variant == SAVED:
         return case.saved_body
+    if variant == NOTES:
+        return str(read_json(notes_path(h, case))["body"])
+    if variant == FACTS:
+        return cases.facts_part(case.loaded) or "None recorded."
     return str(read_json(gen_path(h, case, int(variant)))["body"])
+
+
+def material(h: Harness, case: Case, variant: str) -> str:
+    """Everything the next session would get with this handoff: a baseline alone, ContextRail's
+    narrative with the facts recorded beside it."""
+    if variant in BASELINES:
+        return body(h, case, variant)
+    facts = cases.facts_part(case.loaded)
+    return f"{facts}\n\n{body(h, case, variant)}" if facts else body(h, case, variant)
+
+
+def _fork(case: Case) -> List[str]:
+    """Arguments that continue session A from the reply before its request, in a copy."""
+    if not Path(case.cwd).is_dir():
+        raise EvalError(f"{case.key}: the session's folder {case.cwd} is gone")
+    args = ["--resume", case.a, "--resume-session-at", case.fork_uuid, "--fork-session", "--model", case.model]
+    return args + (["--effort", case.effort] if case.effort else [])
 
 
 def generate(h: Harness, case: Case, cap: int) -> Dict[str, Any]:
     """A's handoff again, from the reply before its request, with the request at this cap."""
-    if not Path(case.cwd).is_dir():
-        raise EvalError(f"{case.key}: the session's folder {case.cwd} is gone")
-    args = ["--resume", case.a, "--resume-session-at", case.fork_uuid, "--fork-session", "--model", case.model]
-    if case.effort:
-        args += ["--effort", case.effort]
+    args = _fork(case)
     stdin = cases.FEEDBACK + prompts.request(case.usage_line, cap, case.refresh)
     data = h.claude(args, stdin, Path(case.cwd))
     path = gen_path(h, case, cap)
@@ -218,6 +286,16 @@ def generate(h: Harness, case: Case, cap: int) -> Dict[str, Any]:
     if text is None:
         raise _fail(path, data["result"], f"{case.key}: no handoff block in the reply at cap {cap}")
     return write_json(path, {"cap": cap, "body": text, "chars": len(text), "reply": data["result"], **_meta(data)})
+
+
+def generate_notes(h: Harness, case: Case) -> Dict[str, Any]:
+    """Baseline C: at the same point, A asked plainly for notes, as a user would without ContextRail."""
+    data = h.claude(_fork(case), NOTES_PROMPT, Path(case.cwd))
+    path = notes_path(h, case)
+    text = data["result"].strip()
+    if not text:
+        raise _fail(path, data["result"], f"{case.key}: the notes reply is empty")
+    return write_json(path, {"variant": NOTES, "body": text, "chars": len(text), "reply": data["result"], **_meta(data)})
 
 
 def _content(entry: cases.Entry) -> List[Dict[str, Any]]:
@@ -325,12 +403,17 @@ def _verdicts(reply: str, ids: List[int]) -> Dict[str, Any]:
 def judge(h: Harness, case: Case, first: str, second: str) -> Dict[str, Any]:
     """Each need judged in both handoffs, `first` shown as handoff 1."""
     listed = read_json(needs_path(h, case))["needs"]
-    stdin = JUDGE_PROMPT.format(
-        facts=cases.facts_part(case.loaded) or "None recorded.",
-        first=body(h, case, first),
-        second=body(h, case, second),
-        needs="\n".join(f"{item['id']}. {item['need']}" for item in listed),
-    )
+    numbered = "\n".join(f"{item['id']}. {item['need']}" for item in listed)
+    alone = first in BASELINES or second in BASELINES
+    if alone:
+        stdin = JUDGE_ALONE_PROMPT.format(first=material(h, case, first), second=material(h, case, second), needs=numbered)
+    else:
+        stdin = JUDGE_PROMPT.format(
+            facts=cases.facts_part(case.loaded) or "None recorded.",
+            first=body(h, case, first),
+            second=body(h, case, second),
+            needs=numbered,
+        )
     data = h.claude(["--tools", "", "--model", h.judge_model], stdin, h.work)
     path = judge_path(h, case, first, second)
     try:
@@ -342,8 +425,8 @@ def judge(h: Harness, case: Case, first: str, second: str) -> Dict[str, Any]:
         {"id": item["id"], first: found["by_id"][item["id"]]["h1"], second: found["by_id"][item["id"]]["h2"]}
         for item in listed
     ]
-    return write_json(path, {"first": first, "second": second, "verdicts": verdicts,
-                         "better": names[found["better"]], "model": h.judge_model, **_meta(data)})
+    return write_json(path, {"first": first, "second": second, "verdicts": verdicts, "better": names[found["better"]],
+                             "facts": "with each" if alone else "shared", "model": h.judge_model, **_meta(data)})
 
 
 def claude_version(h: Harness) -> Optional[str]:

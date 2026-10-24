@@ -74,6 +74,26 @@ class LastUsageTest(unittest.TestCase):
         write_transcript(self.path, [user()])
         self.assertIsNone(usage.last_usage(str(self.path)))
 
+    def test_entries_of_the_wrong_shape_are_skipped(self):
+        write_transcript(self.path, [
+            assistant(70_000, content=[{"type": "text", "text": "reply"}], message_id="m1"),
+            {"type": "assistant", "message": "usage"},
+            {"type": "assistant", "message": {"usage": "assistant", "content": 5}},
+            {"type": "assistant", "message": {"usage": {"input_tokens": "9", "cache_read_input_tokens": True}, "content": [{"type": "text", "text": 7}]}},
+        ])
+        self.assertEqual(usage.last_usage(str(self.path)).tokens, 70_000)
+        self.assertEqual(usage.session_start(str(self.path)), (70_000, False))
+        self.assertEqual(usage.last_assistant_text(str(self.path)), "reply")
+
+    def test_claude_version_of_the_latest_entries(self):
+        write_transcript(self.path, [
+            dict(user(), version="2.1.100"), dict(assistant(10), version="2.1.163"), dict(user(), version="next"),
+        ])
+        self.assertEqual(usage.claude_version(str(self.path)), (2, 1, 163))
+        write_transcript(self.path, [user()])
+        self.assertIsNone(usage.claude_version(str(self.path)))
+        self.assertIsNone(usage.claude_version(None))
+
     def test_window_resolution(self):
         self.assertEqual(usage.resolve_window("claude-opus-5-5", 10, 500_000), (500_000, "config"))
         self.assertEqual(usage.resolve_window("claude-opus-5-5", 10, 500_000, 200_000), (500_000, "config"))

@@ -65,13 +65,15 @@ COMMITS_BUDGET = 180
 FILES_BUDGET = 200
 DIRTY_BUDGET = 120
 ITEM_CHARS = 60
+# Deleted and new files compared by content to find renames git doesn't pair up.
+MAX_RENAME_PAIRS = 50
 
 
-def run_git(args: List[str], cwd: Path) -> Optional[str]:
+def run_git(args: List[str], cwd: Path, stdin: Optional[str] = None) -> Optional[str]:
     """Raw stdout of a git command, or None if git fails or is missing."""
     try:
         result = subprocess.run(
-            ["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=5
+            ["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=5, input=stdin
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -90,11 +92,21 @@ class GitState:
     subject: str
     dirty: List[str]
     diff_hash: str
+    # For a linked worktree (git worktree add), the repository it belongs to; "" for a main one.
+    worktree_of: str = ""
 
 
 def git_state(root: Path) -> Optional[GitState]:
-    if run_git(["rev-parse", "--git-dir"], root) is None:
+    dirs = run_git(["rev-parse", "--absolute-git-dir", "--git-common-dir"], root)
+    if dirs is None:
         return None
+    worktree_of = ""
+    parts = dirs.strip().splitlines()
+    if len(parts) == 2:
+        own, common = Path(parts[0]), Path(parts[1])
+        common = common if common.is_absolute() else (root / common)
+        if own.resolve() != common.resolve():
+            worktree_of = str(common.resolve().parent)
     head = (run_git(["rev-parse", "HEAD"], root) or "").strip()
     branch = (run_git(["rev-parse", "--abbrev-ref", "HEAD"], root) or "").strip()
     subject = (run_git(["log", "-1", "--format=%s"], root) or "").strip() if head else ""
@@ -102,14 +114,51 @@ def git_state(root: Path) -> Optional[GitState]:
     dirty = [line[3:] for line in status.splitlines() if len(line) > 3]
     diff = run_git(["diff", "HEAD"], root) if head else ""
     diff_hash = hashlib.sha1((diff or "").encode("utf-8", "replace")).hexdigest()
-    return GitState(branch=branch, head=head, subject=subject, dirty=dirty, diff_hash=diff_hash)
+    return GitState(branch=branch, head=head, subject=subject, dirty=dirty, diff_hash=diff_hash, worktree_of=worktree_of)
+
+
+class CheckRun(NamedTuple):
+    """A test, lint or build run, with what decides whether its result still holds."""
+
+    command: str  # the check alone, shortened
+    result: str  # one of RESULTS
+    exit_code: Optional[int] = None  # of the check when known, else of the whole command
+    evidence: str = ""  # "exit status", "output", or "" when nothing showed the result
+    cwd: Optional[str] = None  # where it ran, relative to the project root ("." for the root)
+    at: Optional[str] = None  # when it ran, as the transcript records it (ISO 8601, UTC)
+    edits_after: int = 0  # files in the project edited after it ran, in the same session
+    git_after: bool = False  # a commit, checkout, reset, rebase, merge, pull or stash ran after it
+
+    @property
+    def verified(self) -> bool:
+        """Only an exit status of 0 that is the check's own counts as a verified pass."""
+        return self.result == "passed"
+
+    def to_json(self) -> Dict[str, Any]:
+        return dict(self._asdict(), verified=self.verified)
+
+
+# What a check's result can be. "passed" needs the check's own exit status of 0; "output says passed"
+# is a passing summary line from a command whose exit status a pipe or a later command hid.
+RESULTS = (
+    "passed", "failed", "output says passed", "ran", "timed out", "interrupted", "stopped", "no result yet",
+    "result unknown",
+)
+PASSING = ("passed", "output says passed")
 
 
 @dataclass
 class Activity:
     edited: List[str] = field(default_factory=list)  # inside the project, latest edit last
     outside: int = 0  # files edited outside the project
-    checks: List[Tuple[str, str]] = field(default_factory=list)  # (command, result word)
+    checks: List[CheckRun] = field(default_factory=list)  # oldest first, the latest run of each command
+
+    def __post_init__(self) -> None:
+        # (command, result) pairs are taken as runs with nothing else known.
+        self.checks = [check if isinstance(check, CheckRun) else CheckRun(*check) for check in self.checks]
+
+    def results(self) -> List[Tuple[str, str]]:
+        return [(check.command, check.result) for check in self.checks]
 
 
 @dataclass(frozen=True)
@@ -332,17 +381,80 @@ def output_verdict(text: str) -> Optional[str]:
     return None if "failed" in verdicts else "passed"
 
 
-def check_result(check: Check, block: Dict[str, Any]) -> str:
-    """passed, failed, ran (finished, result not visible) or result unknown."""
-    if check.detached:
-        return "result unknown"
-    text = _result_text(block.get("content"))
-    failed = bool(block.get("is_error"))
-    if failed and not text.startswith("Exit code"):
-        return "result unknown"  # denied, blocked or stopped before it finished
+EXIT_RE = re.compile(r"\AExit code (\d+)")
+TIMED_OUT_RE = re.compile(r"^Command timed out after ", re.M)
+INTERRUPTED_RE = re.compile(r"\[Request interrupted by user")
+# Claude Code moved a command that ran too long, or one a message arrived during, to the background.
+MOVED_RE = re.compile(r"(?:moved to the background \(ID: |running in background with ID: )([A-Za-z0-9_-]+)")
+# What Claude Code tells the session when a background command ends.
+NOTICE_RE = re.compile(r"<task-notification>(.*?)</task-notification>", re.S)
+NOTICE_FIELD_RE = re.compile(r"<(tool-use-id|task-id|status|summary)>(.*?)</\1>", re.S)
+SUMMARY_EXIT_RE = re.compile(r"exit code (\d+)")
+# Exit codes of a command stopped by a signal: 128 + SIGTERM, and Claude Code's 144 for a stopped task.
+SIGNALLED = (130, 137, 143, 144)
+# Git commands after which a check no longer describes the files: they change HEAD or the working tree.
+GIT_CHANGE_RE = re.compile(
+    r"(?:^|[;&|(\s])git(?:\s+-[Cc]\s+\S+)*\s+"
+    r"(commit|checkout|switch|reset|rebase|merge|pull|stash|cherry-pick|revert|am|apply|restore|clean)\b"
+)
+
+
+def _verdict(check: Check, text: str, failed: bool, code: Optional[int]) -> Tuple[str, str]:
+    """The result of a finished command and what showed it: (result, evidence)."""
+    if code in SIGNALLED or TIMED_OUT_RE.search(text):
+        return ("timed out" if TIMED_OUT_RE.search(text) else "stopped"), "exit status"
     if check.exit_status:
-        return "failed" if failed else "passed"
-    return output_verdict(text) or "ran"
+        return ("failed" if failed else "passed"), "exit status"
+    summary = output_verdict(text)
+    if summary == "failed":
+        return "failed", "output"
+    if summary == "passed":
+        # A passing summary only stands for a command that finished well; otherwise the two disagree.
+        return ("result unknown", "output") if failed else ("output says passed", "output")
+    return "ran", ""
+
+
+def check_result(check: Check, block: Dict[str, Any]) -> str:
+    """The check's result from its tool result alone: see RESULTS."""
+    return _check_outcome(check, block)[0]
+
+
+def _check_outcome(check: Check, block: Dict[str, Any]) -> Tuple[str, str, Optional[int], Optional[str]]:
+    """(result, evidence, exit code, background task id) of a check from its tool result."""
+    text = _result_text(block.get("content"))
+    moved = MOVED_RE.search(text)
+    if moved:
+        return "no result yet", "", None, moved.group(1)
+    if check.detached:
+        return "no result yet", "", None, None
+    if INTERRUPTED_RE.search(text):
+        return "interrupted", "", None, None
+    failed = bool(block.get("is_error"))
+    code_match = EXIT_RE.match(text)
+    code = int(code_match.group(1)) if code_match else (None if failed else 0)
+    if failed and not code_match:
+        return "result unknown", "", None, None  # denied, blocked or stopped before it finished
+    result, evidence = _verdict(check, text, failed, code)
+    return result, evidence, code, None
+
+
+def _notice_outcome(check: Check, fields: Dict[str, str]) -> Tuple[str, str, Optional[int]]:
+    """The result of a background check from the notification of its end."""
+    status = fields.get("status", "").strip().lower()
+    summary = fields.get("summary", "")
+    found = SUMMARY_EXIT_RE.search(summary)
+    code = int(found.group(1)) if found else (0 if status == "completed" else None)
+    if status in ("killed", "stopped") or "was stopped" in summary:
+        return "stopped", "exit status", code
+    if code is None:
+        return "result unknown", "", None
+    if code in SIGNALLED:
+        return "stopped", "exit status", code
+    # The notification gives the exit status of the whole command, which is the check's only when
+    # nothing after it decides the status.
+    if check.exit_status:
+        return ("passed" if code == 0 else "failed"), "exit status", code
+    return ("ran" if code == 0 else "result unknown"), "", code
 
 
 def _inside(path: str, root: Path) -> Optional[str]:
@@ -353,18 +465,39 @@ def _inside(path: str, root: Path) -> Optional[str]:
         return None
 
 
+def _relative_cwd(cwd: Any, root: Path) -> Optional[str]:
+    if not isinstance(cwd, str) or not cwd:
+        return None
+    inside = _inside(cwd, root)
+    return (inside or ".") if inside is not None else cwd
+
+
+def _notices(content: Any) -> List[Dict[str, str]]:
+    """The background-task notifications in a user message, as their fields."""
+    text = content if isinstance(content, str) else _result_text(content)
+    if "<task-notification>" not in text:
+        return []
+    return [dict(NOTICE_FIELD_RE.findall(body)) for body in NOTICE_RE.findall(text)]
+
+
 def session_activity(transcript_path: Optional[str], root: Path) -> Activity:
-    edited: Dict[str, None] = {}
+    """Files the session edited and the checks it ran, from its transcript. Each check keeps what
+    shows whether its result still holds: when and where it ran, and what was edited after it."""
+    edited: Dict[str, int] = {}  # path -> sequence number of its latest edit
     outside = set()
-    checks: Dict[str, Check] = {}  # tool_use_id -> check
-    results: Dict[str, str] = {}
+    checks: Dict[str, Tuple[Check, int, Optional[str], Optional[str]]] = {}  # tool id -> (check, seq, cwd, at)
+    outcomes: Dict[str, Tuple[str, str, Optional[int]]] = {}
+    tasks: Dict[str, str] = {}  # background task id -> tool id
+    pending = set()  # tool ids of checks moved to the background, waiting for their notification
+    git_changes: List[int] = []  # sequence numbers of git commands that change the tree
+    seq = 0
     if not transcript_path:
         return Activity()
     root = root.resolve()
     try:
         with open(transcript_path, encoding="utf-8", errors="replace") as f:
             for line in f:
-                if '"tool_use"' not in line and '"tool_result"' not in line:
+                if '"tool_use"' not in line and '"tool_result"' not in line and "task-notification" not in line:
                     continue
                 try:
                     entry = json.loads(line)
@@ -372,15 +505,22 @@ def session_activity(transcript_path: Optional[str], root: Path) -> Activity:
                     continue
                 if not isinstance(entry, dict) or entry.get("isSidechain"):
                     continue
-                content = (entry.get("message") or {}).get("content")
+                message = entry.get("message")
+                content = message.get("content") if isinstance(message, dict) else None
+                if entry.get("type") == "user":
+                    for fields in _notices(content):
+                        tool_id = fields.get("tool-use-id") or tasks.get(fields.get("task-id", ""), "")
+                        if tool_id in checks:
+                            outcomes[tool_id] = _notice_outcome(checks[tool_id][0], fields)
                 if not isinstance(content, list):
                     continue
                 for block in content:
                     if not isinstance(block, dict):
                         continue
                     if block.get("type") == "tool_use":
-                        name = block.get("name")
-                        args = block.get("input") or {}
+                        seq += 1
+                        name = block.get("name") if isinstance(block.get("name"), str) else ""
+                        args = block.get("input") if isinstance(block.get("input"), dict) else {}
                         if name in EDIT_TOOLS:
                             path = args.get("file_path") or args.get("notebook_path")
                             if isinstance(path, str):
@@ -389,25 +529,42 @@ def session_activity(transcript_path: Optional[str], root: Path) -> Activity:
                                     outside.add(path)
                                 else:
                                     edited.pop(relative, None)
-                                    edited[relative] = None
+                                    edited[relative] = seq
                         elif name == "Bash":
                             command = args.get("command")
-                            check = find_check(command) if isinstance(command, str) else None
+                            if not isinstance(command, str):
+                                continue
+                            if GIT_CHANGE_RE.search(command):
+                                git_changes.append(seq)
+                            check = find_check(command)
                             if check and args.get("run_in_background"):
                                 check = replace(check, detached=True)
                             if check:
-                                checks[str(block.get("id"))] = check
+                                at = entry.get("timestamp") if isinstance(entry.get("timestamp"), str) else None
+                                checks[str(block.get("id"))] = (check, seq, _relative_cwd(entry.get("cwd"), root), at)
                     elif block.get("type") == "tool_result":
                         tool_id = str(block.get("tool_use_id"))
-                        if tool_id in checks:
-                            results[tool_id] = check_result(checks[tool_id], block)
+                        if tool_id in checks and tool_id not in outcomes:
+                            result, evidence, code, task = _check_outcome(checks[tool_id][0], block)
+                            if task:
+                                tasks[task] = tool_id
+                            if result == "no result yet":
+                                pending.add(tool_id)
+                            else:
+                                outcomes[tool_id] = (result, evidence, code)
     except OSError:
         return Activity()
-    latest: Dict[str, str] = {}
-    for tool_id, check in checks.items():
+    latest: Dict[str, CheckRun] = {}
+    for tool_id, (check, at_seq, cwd, at) in checks.items():
+        waiting = check.detached or tool_id in pending
+        result, evidence, code = outcomes.get(tool_id, ("no result yet" if waiting else "result unknown", "", None))
         latest.pop(check.command, None)
-        latest[check.command] = results.get(tool_id, "result unknown")
-    return Activity(edited=list(edited), outside=len(outside), checks=list(latest.items())[-MAX_CHECKS:])
+        latest[check.command] = CheckRun(
+            command=check.command, result=result, exit_code=code, evidence=evidence, cwd=cwd, at=at,
+            edits_after=sum(1 for last in edited.values() if last > at_seq),
+            git_after=any(change > at_seq for change in git_changes),
+        )
+    return Activity(edited=list(edited), outside=len(outside), checks=list(latest.values())[-MAX_CHECKS:])
 
 
 def _clip(text: str, limit: int, keep_end: bool = False) -> str:
@@ -448,7 +605,7 @@ def _paths(output: Optional[str]) -> Optional[set]:
 def uncommitted_hashes(root: Path) -> Optional[Dict[str, str]]:
     """A content hash of every uncommitted file, tracked or new, for the drift
     check; None when there are too many or git can't say."""
-    tracked = _paths(run_git(["diff", "--name-only", "-z", "HEAD"], root))
+    tracked = _paths(run_git(["diff", "--no-renames", "--name-only", "-z", "HEAD"], root))
     untracked = _paths(run_git(["ls-files", "--others", "--exclude-standard", "-z"], root))
     if tracked is None or untracked is None or len(tracked | untracked) > MAX_HASHED:
         return None
@@ -461,7 +618,7 @@ def changed_files(meta: Dict, root: Path) -> Optional[List[str]]:
     hashes = meta.get("file_hashes")
     if not isinstance(hashes, dict) or not meta.get("head"):
         return None
-    differ = _paths(run_git(["diff", "--name-only", "-z", meta["head"]], root))
+    differ = _paths(run_git(["diff", "--no-renames", "--name-only", "-z", meta["head"]], root))
     untracked = _paths(run_git(["ls-files", "--others", "--exclude-standard", "-z"], root))
     if differ is None or untracked is None:
         return None
@@ -472,24 +629,88 @@ def changed_files(meta: Dict, root: Path) -> Optional[List[str]]:
     return sorted(changed)
 
 
+def edited_hashes(root: Path, edited: List[str]) -> Dict[str, str]:
+    """Content hashes of the files a session edited, for the drift check of a folder that git
+    doesn't manage: there, they are the only files whose changes can be told."""
+    return {path: _content_hash(root / path) for path in edited[-MAX_HASHED:]}
+
+
+def _renames(meta: Dict, root: Path, changed: List[str]) -> List[Tuple[str, str]]:
+    """(old, new) for files renamed since the handoff: those git pairs up, and a deleted file whose
+    content now sits under a new, untracked name (a plain `mv`)."""
+    found: Dict[str, str] = {}
+    status = run_git(["diff", "--name-status", "-M", "-z", meta["head"]], root) or ""
+    fields = status.split("\0")
+    i = 0
+    while i < len(fields):
+        code = fields[i]
+        if code.startswith(("R", "C")) and i + 2 < len(fields):
+            if code.startswith("R"):
+                found[fields[i + 1]] = fields[i + 2]
+            i += 3
+        else:
+            i += 2
+    gone = [path for path in changed if path not in found and not (root / path).exists()][:MAX_RENAME_PAIRS]
+    new = [path for path in changed if path not in found.values() and (root / path).is_file()][:MAX_RENAME_PAIRS]
+    if gone and new:
+        # What each gone file held: its blob at the handoff's commit, or the hash recorded for it then.
+        hashes = meta.get("file_hashes") if isinstance(meta.get("file_hashes"), dict) else {}
+        before = {path: "sha1 " + str(hashes[path]) for path in gone if path in hashes}
+        listing = run_git(["ls-tree", "-r", "-z", meta["head"], "--", *gone], root) or ""
+        for item in listing.split("\0"):
+            info, _, path = item.partition("\t")
+            if path in gone and path not in before and len(info.split()) == 3:
+                before[path] = "blob " + info.split()[2]
+        blobs = (run_git(["hash-object", "--stdin-paths"], root, stdin="\n".join(new) + "\n") or "").split()
+        for path, blob in zip(new, blobs if len(blobs) == len(new) else [""] * len(new)):
+            for old, value in list(before.items()):
+                if value in ("blob " + blob, "sha1 " + _content_hash(root / path)):
+                    found[old] = path
+                    del before[old]
+                    break
+    return sorted(found.items())
+
+
 class Drift(NamedTuple):
     notes: List[str]
     changed: List[str]  # files changed since the handoff, when that is known
+    renamed: List[Tuple[str, str]] = []  # (old, new) for files renamed since
+    # False when the repository's state now could not be compared with the handoff's: the notes say why.
+    verified: bool = True
+
+
+def _unverified(note: str, notes: Optional[List[str]] = None) -> Drift:
+    return Drift((notes or []) + [note], [], [], False)
 
 
 def drift(meta: Dict, root: Path) -> Drift:
-    """What changed in the repository since the handoff was saved."""
+    """What changed in the repository since the handoff was saved. When that can't be worked out,
+    the result says so (verified is False) instead of reporting no changes."""
+    if not meta:
+        return _unverified("The state recorded with the handoff is missing, so changes since it can't be checked.")
+    nogit = meta.get("edited_hashes")
     if not meta.get("head"):
-        return Drift([], [])
+        now = git_state(root)
+        if isinstance(nogit, dict):
+            changed = sorted(path for path, digest in nogit.items() if _content_hash(root / path) != digest)
+            notes = ["Not a git repository: only the files edited in the earlier session were checked."]
+            if changed:
+                notes.append(f"Files changed since the handoff ({len(changed)}): {_fit(changed, FILES_BUDGET)}.")
+            return Drift(notes, changed, [], True)
+        if now is not None and now.head:
+            return _unverified("The handoff was saved before this repository had a commit, so changes since can't be checked.")
+        return _unverified("The handoff recorded no git state, so changes since it can't be checked.")
     now = git_state(root)
     if now is None:
-        return Drift([], [])
+        return _unverified("The handoff was saved in a git repository, but git can't read this folder now, so changes since can't be checked.")
     notes = []
     if meta.get("branch") and now.branch != meta["branch"]:
         notes.append(f"Branch changed: {_clip(meta['branch'], BRANCH_CHARS)} → {_clip(now.branch, BRANCH_CHARS)}.")
+    rewritten = False
     if now.head != meta["head"]:
         log = run_git(["log", "--format=%h %s", f"{meta['head']}..HEAD"], root)
         if log is None:
+            rewritten = True
             notes.append(
                 f"HEAD has moved to {now.head[:9]} and the handoff's commit {meta['head'][:9]} "
                 "is no longer in its history (rebase or reset?)."
@@ -501,24 +722,33 @@ def drift(meta: Dict, root: Path) -> Drift:
             else:
                 notes.append(f"HEAD moved back to {now.head[:9]} (reset or checkout?).")
     if meta.get("dirty") is None:  # not recorded: a handoff restored from an old archive
-        return Drift(notes, [])
+        return Drift(notes + ["The handoff recorded no uncommitted files, so file changes since can't be checked."], [], [], False)
     before = set(meta["dirty"])
     after = set(now.dirty)
     if before - after:
         gone = [_clip(path, ITEM_CHARS, keep_end=True) for path in sorted(before - after)]
         notes.append(f"No longer uncommitted (committed or reverted): {_fit(gone, DIRTY_BUDGET)}.")
     changed = changed_files(meta, root)
-    if changed is None:  # saved without file hashes: compare the git state only
+    if changed is None:  # saved without file hashes, or the handoff's commit is gone: compare the git state only
         if after - before:
             notes.append(f"Newly uncommitted: {_fit(sorted(after - before), DIRTY_BUDGET)}.")
         if before == after and before and meta.get("diff_hash") and meta["diff_hash"] != now.diff_hash:
             notes.append("The uncommitted changes were edited after the handoff was saved.")
+        if rewritten:
+            notes.append("Which files changed can't be told; re-check every claim about files.")
+            return Drift(notes, [], [], False)
         return Drift(notes, [])
-    if changed:
-        listed = _fit([_clip(path, ITEM_CHARS, keep_end=True) for path in changed], FILES_BUDGET)
-        note = f"Files changed since the handoff ({len(changed)}): {listed}."
+    renamed = _renames(meta, root, changed) if changed else []
+    if renamed:
+        listed = _fit([f"{_clip(old, ITEM_CHARS, True)} → {_clip(new, ITEM_CHARS, True)}" for old, new in renamed], FILES_BUDGET)
+        notes.append(f"Renamed since the handoff: {listed}.")
+    moved = {old for old, _ in renamed} | {new for _, new in renamed}
+    others = [path for path in changed if path not in moved]
+    if others:
+        listed = _fit([_clip(path, ITEM_CHARS, keep_end=True) for path in others], FILES_BUDGET)
+        note = f"Files changed since the handoff ({len(others)}): {listed}."
         stat = run_git(["diff", "--shortstat", meta["head"]], root) if not before else None
         if stat and stat.strip():  # with nothing uncommitted at the handoff, this is all since
             note += f" Tracked files: {stat.strip()}."
         notes.append(note)
-    return Drift(notes, changed)
+    return Drift(notes, changed, renamed)

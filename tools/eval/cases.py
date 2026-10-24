@@ -5,6 +5,7 @@ a model."""
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import re
 import time
@@ -13,16 +14,18 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from contextrail import handoff, usage
-from contextrail.store import slug
+from contextrail.store import claude_slug
 
 Entry = Dict[str, Any]
 
 LOAD_RE = re.compile(r'<contextrail-previous-handoff saved="([^"]+)"')
 # Claude Code keeps hook context over its limit in a file and shows the session a preview.
 PERSISTED_RE = re.compile(r"Full output saved to: (\S+)")
+# A blocked stop's reason reaches the agent as a meta user message with this prefix. Stop feedback
+# (Claude Code 2.1.163 and later) is saved as a hook_additional_context attachment instead.
 FEEDBACK = "Stop hook feedback:\n"
-REQUEST_START = FEEDBACK + "ContextRail: this session is at "
-FIX_START = FEEDBACK + "ContextRail: the handoff needs fixing"
+REQUEST_START = "ContextRail: this session is at "
+FIX_START = "ContextRail: the handoff needs fixing"
 USAGE_RE = re.compile(r"this session is at (.+?)\. The user set up ContextRail")
 CAP_RE = re.compile(r"Stay under ([\d,]+) characters")
 WINDOW_RE = re.compile(r"of a (\d+)([kM]) window")
@@ -41,6 +44,8 @@ NOT_MESSAGES = ("<command-name>", "<local-command", "<task-notification>")
 SENDERS = ("human", "plugin")
 # The entrypoint of claude -p and Agent SDK sessions.
 SCRIPTED = "sdk-cli"
+# The share of cases, in percent, set aside for tuning; the rest are held out.
+TUNE_SHARE = 30
 
 
 @dataclass
@@ -127,13 +132,27 @@ def tool_results(entry: Entry) -> bool:
     )
 
 
+def hook_text(entry: Entry) -> str:
+    """What a Stop hook sent the agent in this transcript line, either way it can arrive; "" for any
+    other line."""
+    if main_line(entry, "user") and entry.get("isMeta"):
+        sent = text(entry)
+        return sent[len(FEEDBACK):] if sent.startswith(FEEDBACK) else ""
+    attachment = entry.get("attachment")
+    if main_line(entry, "attachment") and isinstance(attachment, dict) and attachment.get("type") == "hook_additional_context" \
+            and attachment.get("hookEvent") == "Stop":
+        content = attachment.get("content")
+        return "\n".join(part for part in content if isinstance(part, str)) if isinstance(content, list) else ""
+    return ""
+
+
 def is_request(entry: Entry) -> bool:
     """ContextRail's handoff request, as the Stop hook delivered it."""
-    return main_line(entry, "user") and bool(entry.get("isMeta")) and text(entry).startswith(REQUEST_START)
+    return hook_text(entry).startswith(REQUEST_START)
 
 
 def is_fix(entry: Entry) -> bool:
-    return main_line(entry, "user") and bool(entry.get("isMeta")) and text(entry).startswith(FIX_START)
+    return hook_text(entry).startswith(FIX_START)
 
 
 def is_prompt(entry: Entry) -> bool:
@@ -255,14 +274,14 @@ def _window(texts: List[str]) -> Optional[int]:
 def _usage_line(entries: List[Entry], request: int, measured: Entry, loaded_text: str) -> Tuple[str, bool]:
     """The usage line and refresh flag for the request: copied from ContextRail's own
     request, or built the way it builds them when the user asked."""
-    asked = text(entries[request])
+    asked = hook_text(entries[request])
     if is_request(entries[request]):
         match = USAGE_RE.search(asked)
         if match:
             return match.group(1), REFRESH in asked
     tokens = usage._context_tokens(measured)
     model = _model(measured)
-    earlier = [text(entry) for entry in entries[:request] if is_request(entry)]
+    earlier = [hook_text(entry) for entry in entries[:request] if is_request(entry)]
     window = _window(earlier[::-1] + [loaded_text])
     size, source = (window, "observed") if window else usage.resolve_window(model, tokens, None)
     refresh = any(has_handoff(entry) for entry in entries[:request])
@@ -278,7 +297,7 @@ def _cap(entries: List[Entry], reply: int) -> Optional[int]:
     """The cap in the latest ContextRail request before the reply."""
     for i in range(reply - 1, -1, -1):
         if is_request(entries[i]):
-            match = CAP_RE.search(text(entries[i]))
+            match = CAP_RE.search(hook_text(entries[i]))
             return int(match.group(1).replace(",", "")) if match else None
     return None
 
@@ -324,7 +343,7 @@ def discover(project: Path, min_messages: int = 1, now: Optional[float] = None) 
     """Cases in the transcripts of sessions started in `project`, oldest first, and a note on
     each pair left out. When two sessions loaded the same handoff, B is the one with more messages."""
     now = time.time() if now is None else now
-    names = {slug(project), slug(project.resolve())}
+    names = {claude_slug(project), claude_slug(project.resolve())}
     folders = [usage.claude_projects() / name for name in sorted(names)]
     found: List[Case] = []
     notes: List[str] = []
@@ -373,6 +392,12 @@ def discover(project: Path, min_messages: int = 1, now: Optional[float] = None) 
                 notes.append(f"A {a_path.stem[:8]} → B {b_path.stem[:8]}: {why}")
     found.sort(key=lambda case: parse_time(case.reply_at) or dt.datetime.min.replace(tzinfo=dt.timezone.utc))
     return found, notes
+
+
+def split(key: str) -> str:
+    """"tune" for the cases prompts and thresholds may be tuned on, "test" for the held-out ones
+    that judge the result. Fixed by a hash of the key, so a case never changes sides."""
+    return "tune" if int(hashlib.sha256(key.encode("utf-8")).hexdigest()[:8], 16) % 100 < TUNE_SHARE else "test"
 
 
 def facts_part(loaded_text: str) -> str:

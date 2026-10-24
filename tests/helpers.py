@@ -51,7 +51,10 @@ Add rate limiting to the public API so one client cannot starve the rest.
 ## Known facts
 - 3 routes need the limiter: `/v1/invoices`, `/v1/customers`, `/v1/payments`. `/healthz` stays unlimited.
 - The spec's default is 600 requests per minute per key (ticket BILL-482).
-- `pytest -q` fails only in `test_requires_key`: the limiter runs before auth, so a request without a key gets 429 instead of 401. Unconfirmed whether `/healthz` is affected too.
+- `pytest -q` fails only in `test_requires_key`: the limiter runs before auth, so a request without a key gets 429 instead of 401.
+
+## Hypotheses
+- `/healthz` may be limited too, since the middleware wraps every route. A test that sends 601 requests to it would tell.
 
 ## How to run
 - Tests: `pytest -q` from the repository root with `BILLING_ENV=test`; the default `dev` needs a running database.

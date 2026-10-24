@@ -158,7 +158,7 @@ class View:
 def _view(payload: Dict[str, Any], window: int) -> View:
     workspace = payload.get("workspace") if isinstance(payload.get("workspace"), dict) else {}
     cwd = payload.get("cwd") or workspace.get("current_dir")
-    project = store.Project(facts.project_root(cwd)) if isinstance(cwd, str) and cwd else None
+    project = store.open_project(facts.project_root(cwd)) if isinstance(cwd, str) and cwd else None
     cfg = config.load(project.dir if project else None)
     entry = store.load_state(project)["sessions"].get(str(payload.get("session_id") or "")) if project else None
     entry = entry if isinstance(entry, dict) else {}
@@ -390,8 +390,7 @@ def setup() -> int:
         return 1
     launcher = launcher_path()
     try:
-        store.write_atomic(launcher, LAUNCHER)
-        launcher.chmod(0o755)
+        store.write_atomic(launcher, LAUNCHER, mode=store.PRIVATE_PROGRAM)
     except OSError as error:
         print(f"Couldn't write {tilde(launcher)}: {error.strerror or error}")
         return 1

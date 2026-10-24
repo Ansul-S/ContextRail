@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """ContextRail: automatic session handoff for Claude Code.
 
-Hooks (JSON payload on stdin):  cr.py stop | post-tool | pre-compact | session-start
+Hooks (JSON payload on stdin):  cr.py stop | stop-failure | post-tool | pre-compact | session-start | session-end
 Status line (optional):         cr.py statusline [-- COMMAND]
 Manual:                         cr.py status [DIR] | doctor [DIR] [--exit-zero] [--setup-statusline]
                                 cr.py history [--restore N] [DIR]
                                 cr.py lightning [LIMIT | off]
+                                cr.py purge [--archives | --legacy | --stale DAYS | --everything] [--yes] [DIR]
 """
 
 import importlib
@@ -25,15 +26,16 @@ ERROR_LOG_LIMIT = 256 * 1024
 
 
 def log_error() -> None:
-    """Hooks must never break a session: record the error and carry on."""
+    """Hooks must never break a session: record the error and carry on. The log is private and
+    kept small: past ERROR_LOG_LIMIT it starts again."""
+    from contextrail import store
     try:
         path = config.home() / "error.log"
-        path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size > ERROR_LOG_LIMIT:
             path.unlink()
-        with open(path, "a", encoding="utf-8") as log:
-            log.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} {' '.join(sys.argv[1:])}\n")
-            log.write(traceback.format_exc() + "\n")
+        store.append_private(
+            path, f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} {' '.join(sys.argv[1:])}\n{traceback.format_exc()}\n"
+        )
     except OSError:
         pass
 
@@ -63,7 +65,7 @@ def main(argv):
     if argv[1] in ("-V", "--version"):
         print(__version__)
         return 0
-    if argv[1] in ("status", "doctor", "history", "lightning"):
+    if argv[1] in ("status", "doctor", "history", "lightning", "purge"):
         return importlib.import_module(f"contextrail.{argv[1]}").main(argv[2:])
     if argv[1] == "statusline":
         return run_statusline(argv[2:])
@@ -82,7 +84,9 @@ def main(argv):
             return 0
         handlers.heartbeat(event)
         if event == "SessionStart":
-            from contextrail import statusline
+            from contextrail import purge, statusline, store
+            store.secure_home()  # data written by ContextRail 0.6 or earlier was readable by other users
+            purge.retention()
             statusline.note_plugin_root()
         output = handler(payload) if isinstance(payload, dict) else None
     except Exception:

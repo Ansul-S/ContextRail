@@ -48,6 +48,10 @@ DEFAULTS: Dict[str, Any] = {
     # in all, and contextrail-continue starts a new session from the handoff after a countdown.
     # 0 is off. Global only, so ContextRail and contextrail-continue read the same value.
     "lightning_tokens": 0,
+    # How a request reaches the agent: "feedback" continues the turn as hook feedback, "block" blocks
+    # the stop (Claude Code labels that "Stop hook error"), "auto" uses feedback where Claude Code
+    # supports it (2.1.163 and later, read from the transcript) and block elsewhere.
+    "request_style": "auto",
 }
 
 # Settings that a per-project config.json can't change.
@@ -56,7 +60,7 @@ GLOBAL_ONLY = {"lightning_tokens"}
 LIGHTNING_MIN_WORK = 20_000
 # Settings that must be above zero, and settings with a fixed set of values.
 POSITIVE = {"soft_tokens", "hard_tokens", "soft_pct", "hard_pct"}
-CHOICES = {"new_session_at": ("hard", "soft")}
+CHOICES = {"new_session_at": ("hard", "soft"), "request_style": ("auto", "feedback", "block")}
 # hard_tokens when it is not above soft_tokens: unset, or set wrong.
 HARD_GAP = DEFAULTS["hard_tokens"] - DEFAULTS["soft_tokens"]
 
