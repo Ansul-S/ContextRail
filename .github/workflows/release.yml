@@ -1,0 +1,49 @@
+name: Release artifacts
+
+# When a release is published for a tag, test that tag and attach what was tested to the release:
+# the plugin source as a zip and a tarball, their SHA-256 sums, and the test and benchmark output.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  artifacts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Test the tagged version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          mkdir dist
+          python -m unittest discover -s tests -t . -v > "dist/tests-$TAG.txt" 2>&1 || { cat "dist/tests-$TAG.txt"; exit 1; }
+          tail -3 "dist/tests-$TAG.txt"
+          python tools/bench.py --runs 30 > "dist/bench-$TAG.txt"
+          npm install --global --no-audit --no-fund @anthropic-ai/claude-code@latest
+          {
+            claude --version
+            claude plugin validate .
+            claude plugin validate mods/contextrail-continue
+            claude plugin test mods/contextrail-continue
+          } > "dist/plugins-$TAG.txt" 2>&1 || { cat "dist/plugins-$TAG.txt"; exit 1; }
+      - name: Build and upload
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git archive --format=zip --prefix="contextrail-$TAG/" -o "dist/contextrail-$TAG.zip" "$TAG"
+          git archive --format=tar.gz --prefix="contextrail-$TAG/" -o "dist/contextrail-$TAG.tar.gz" "$TAG"
+          (cd dist && sha256sum contextrail-* > "SHA256SUMS-$TAG.txt")
+          gh release upload "$TAG" dist/* --clobber

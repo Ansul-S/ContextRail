@@ -4,19 +4,104 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  test:
+  python:
+    name: Python ${{ matrix.python }} on ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
         python: ["3.9", "3.13"]
+        experimental: [false]
+        include:
+          # Windows is not supported yet (docs/compatibility.md): run the suite, don't fail the build on it.
+          - os: windows-latest
+            python: "3.9"
+            experimental: true
+          - os: windows-latest
+            python: "3.13"
+            experimental: true
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    timeout-minutes: 15
+    env:
+      # The suite takes about 45 s on a laptop and about 1 min on a macOS runner.
+      SUITE_BUDGET_SECONDS: 240
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Run tests
-        run: python -m unittest discover -s tests -t . -v
+      - name: Run the tests
+        shell: bash
+        run: |
+          # unittest lists the slowest tests from Python 3.12 on.
+          durations=$(python -c 'import sys; print("--durations 10" if sys.version_info >= (3, 12) else "")')
+          start=$(date +%s)
+          python -m unittest discover -s tests -t . -v $durations
+          took=$(( $(date +%s) - start ))
+          echo "Python ${{ matrix.python }} on ${{ matrix.os }}: tests took ${took} s (budget ${SUITE_BUDGET_SECONDS} s)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$took" -gt "$SUITE_BUDGET_SECONDS" ]; then
+            echo "::error::The test suite took ${took} s, over its ${SUITE_BUDGET_SECONDS} s budget"
+            exit 1
+          fi
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Ruff
+        run: |
+          python -m pip install --disable-pip-version-check ruff==0.8.4
+          ruff check .
+      - name: Hook latency
+        run: python tools/bench.py --runs 30 --check
+
+  plugins:
+    name: Plugins on Claude Code ${{ matrix.claude }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest Claude Code ContextRail supports: Stop feedback came in 2.1.163.
+          - claude: "2.1.163"
+            mod: false
+          # The oldest contextrail-continue supports: hooks modules are on by default from 2.1.286.
+          - claude: "2.1.286"
+            mod: true
+          - claude: latest
+            mod: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install Claude Code ${{ matrix.claude }}
+        run: |
+          npm install --global --no-audit --no-fund "@anthropic-ai/claude-code@${{ matrix.claude }}"
+          claude --version
+      - name: Validate the marketplace and ContextRail's manifest and hooks
+        run: |
+          claude plugin validate .
+          # At the repository root the validator checks the marketplace; a copy without it checks the plugin.
+          plugin="$RUNNER_TEMP/contextrail"
+          mkdir -p "$plugin"
+          cp -R .claude-plugin hooks commands contextrail README.md "$plugin/"
+          rm "$plugin/.claude-plugin/marketplace.json"
+          claude plugin validate "$plugin"
+      - name: Validate and test contextrail-continue
+        if: matrix.mod
+        run: |
+          claude plugin validate mods/contextrail-continue
+          claude plugin test mods/contextrail-continue

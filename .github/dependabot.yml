@@ -1,0 +1,8 @@
+# ContextRail has no package dependencies (standard-library Python, a TypeScript mod with none),
+# so the only versions to keep current are the GitHub Actions the workflows use.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
