@@ -42,6 +42,11 @@ jobs:
         run: |
           # unittest lists the slowest tests from Python 3.12 on.
           durations=$(python -c 'import sys; print("--durations 10" if sys.version_info >= (3, 12) else "")')
+          # Text read or written without an encoding is an error, in the tests and in the hooks they start:
+          # Windows would use its code page there instead of UTF-8. Python 3.9 has no EncodingWarning.
+          if python -c 'import sys; sys.exit(sys.version_info < (3, 10))'; then
+            export PYTHONWARNDEFAULTENCODING=1 PYTHONWARNINGS=error::EncodingWarning
+          fi
           start=$(date +%s)
           python -m unittest discover -s tests -t . -v $durations
           took=$(( $(date +%s) - start ))
